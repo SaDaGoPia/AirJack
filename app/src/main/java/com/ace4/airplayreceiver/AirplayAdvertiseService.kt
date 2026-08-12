@@ -1,6 +1,7 @@
 package com.ace4.airplayreceiver
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -11,6 +12,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.util.Log
+import com.ace4.airplayreceiver.raop.NowPlayingInfo
 import com.ace4.airplayreceiver.raop.RaopRtspServer
 
 class AirplayAdvertiseService : Service() {
@@ -87,7 +89,7 @@ class AirplayAdvertiseService : Service() {
 
                 // Start the RTSP listener before advertising over mDNS, so the
                 // port is already accepting connections by the time iOS can see us.
-                val server = RaopRtspServer(deviceId)
+                val server = RaopRtspServer(deviceId) { info -> updateNotification(info) }
                 server.start()
                 rtspServer = server
 
@@ -168,13 +170,29 @@ class AirplayAdvertiseService : Service() {
         }
     }
 
-    private fun buildNotification(): Notification =
-        Notification.Builder(this)
-            .setContentTitle(getString(R.string.app_name))
-            .setContentText(getString(R.string.status_advertising))
+    private fun buildNotification(info: NowPlayingInfo = NowPlayingInfo()): Notification {
+        val builder = Notification.Builder(this)
             .setSmallIcon(R.drawable.ic_launcher)
             .setOngoing(true)
-            .build()
+        if (info.isEmpty) {
+            builder.setContentTitle(getString(R.string.app_name))
+            builder.setContentText(getString(R.string.status_advertising))
+        } else {
+            builder.setContentTitle(info.title ?: getString(R.string.app_name))
+            val subtitle = listOfNotNull(info.artist, info.album).joinToString(" — ")
+            builder.setContentText(subtitle.ifBlank { getString(R.string.status_advertising) })
+            info.artwork?.let { builder.setLargeIcon(it) }
+        }
+        return builder.build()
+    }
+
+    /** Called from the RTSP server's connection-handling thread whenever iOS
+     *  pushes new track metadata/artwork; updates the ongoing notification
+     *  in place. NotificationManager is safe to call off the main thread. */
+    private fun updateNotification(info: NowPlayingInfo) {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(NOTIFICATION_ID, buildNotification(info))
+    }
 
     override fun onDestroy() {
         isRunning = false

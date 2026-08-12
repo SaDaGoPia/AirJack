@@ -1,5 +1,6 @@
 package com.ace4.airplayreceiver.raop
 
+import android.graphics.BitmapFactory
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
@@ -28,7 +29,10 @@ private const val TAG = "RaopRtspServer"
  * receiver, which basic local playback here doesn't depend on; skipped as
  * disproportionate effort for this single-device setup (see decisions doc).
  */
-class RaopRtspServer(private val deviceIdHex: String) {
+class RaopRtspServer(
+    private val deviceIdHex: String,
+    private val onNowPlayingChanged: (NowPlayingInfo) -> Unit = {}
+) {
 
     private var serverSocket: ServerSocket? = null
     private var acceptThread: Thread? = null
@@ -43,7 +47,7 @@ class RaopRtspServer(private val deviceIdHex: String) {
             while (running) {
                 try {
                     val socket = server.accept()
-                    val handler = RaopConnectionHandler(socket, deviceIdHex)
+                    val handler = RaopConnectionHandler(socket, deviceIdHex, onNowPlayingChanged)
                     Thread(handler, "RaopConn-${socket.inetAddress.hostAddress}").apply {
                         isDaemon = true
                         start()
@@ -73,7 +77,8 @@ class RaopRtspServer(private val deviceIdHex: String) {
 
 private class RaopConnectionHandler(
     private val socket: Socket,
-    private val deviceIdHex: String
+    private val deviceIdHex: String,
+    private val onNowPlayingChanged: (NowPlayingInfo) -> Unit
 ) : Runnable {
 
     private var aesKey: ByteArray? = null
@@ -87,6 +92,7 @@ private class RaopConnectionHandler(
     private var clientAddress: InetAddress? = null
     private var clientControlPort: Int = 0
     private var expectedSeqno: Int = -1 // -1 = not yet initialized (no packet seen yet)
+    private var nowPlaying = NowPlayingInfo()
 
     companion object {
         /** Bigger gaps than this are treated as a stream restart/reorder, not loss - don't chase them. */
@@ -138,7 +144,7 @@ private class RaopConnectionHandler(
                 "FLUSH" -> handleFlush(cseq)
                 "TEARDOWN" -> RtspProtocol.buildResponse(200, "OK", cseq, mapOf("Connection" to "close"))
                 "GET_PARAMETER" -> RtspProtocol.buildResponse(200, "OK", cseq)
-                "SET_PARAMETER" -> RtspProtocol.buildResponse(200, "OK", cseq)
+                "SET_PARAMETER" -> handleSetParameter(req, cseq)
                 else -> RtspProtocol.buildResponse(501, "Not Implemented", cseq)
             }
         } catch (e: Exception) {
@@ -272,6 +278,53 @@ private class RaopConnectionHandler(
             audioTrack?.flush()
         } catch (_: Exception) {
             // no-op if the track isn't in a state that allows flushing
+        }
+        return RtspProtocol.buildResponse(200, "OK", cseq)
+    }
+
+    /**
+     * iOS pushes track metadata and artwork as separate SET_PARAMETER
+     * requests during playback, distinguished by Content-Type:
+     * application/x-dmap-tagged (title/artist/album) or an image type like
+     * image/jpeg (cover art).
+     * Volume/progress (text/parameters) isn't handled yet - that's part of
+     * the DACP volume-sync work, not this pass.
+     */
+    private fun handleSetParameter(req: RtspRequest, cseq: String?): ByteArray {
+        val contentType = req.header("Content-Type")
+        Log.d(TAG, "SET_PARAMETER Content-Type=$contentType, body=${req.body.size} bytes")
+        when {
+            contentType == null -> {}
+            contentType.startsWith("application/x-dmap-tagged") -> {
+                val fields = DmapParser.parse(req.body)
+                // Text metadata and artwork arrive as separate SET_PARAMETER
+                // requests with no guaranteed order - different source apps
+                // send them differently (observed: YT Music sends artwork
+                // *before* the text). Keep whatever artwork we already have
+                // rather than assuming this text update always comes first;
+                // worst case a new track briefly shows the previous cover
+                // until its own artwork arrives, which is far less bad than
+                // discarding artwork we just successfully decoded.
+                nowPlaying = nowPlaying.copy(title = fields.title, artist = fields.artist, album = fields.album)
+                Log.i(TAG, "Now playing: ${fields.title} - ${fields.artist} (${fields.album})")
+                onNowPlayingChanged(nowPlaying)
+            }
+            contentType.startsWith("image") -> {
+                val bitmap = try {
+                    BitmapFactory.decodeByteArray(req.body, 0, req.body.size)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to decode artwork", e)
+                    null
+                }
+                if (bitmap != null) {
+                    Log.i(TAG, "Artwork decoded: ${bitmap.width}x${bitmap.height}")
+                    nowPlaying = nowPlaying.copy(artwork = bitmap)
+                    onNowPlayingChanged(nowPlaying)
+                } else {
+                    Log.w(TAG, "Artwork Content-Type but decodeByteArray returned null (${req.body.size} bytes)")
+                }
+            }
+            else -> Log.d(TAG, "Unhandled SET_PARAMETER Content-Type: $contentType")
         }
         return RtspProtocol.buildResponse(200, "OK", cseq)
     }
@@ -440,6 +493,10 @@ private class RaopConnectionHandler(
         aesKey = null
         aesIv = null
         alacDecoder = null
+        if (!nowPlaying.isEmpty) {
+            nowPlaying = NowPlayingInfo()
+            onNowPlayingChanged(nowPlaying)
+        }
         audioTrack?.let {
             try {
                 it.stop()

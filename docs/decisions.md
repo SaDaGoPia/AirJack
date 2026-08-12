@@ -236,6 +236,63 @@ logs showed real gaps being detected and resend requests sent (e.g.
 "Requested resend of 2 packet(s) from seqno 33701") with no errors, audio
 continuing to play normally through the recovered gaps.
 
+## Now Playing metadata + artwork notification
+Continuation of the same request, staged with the user into: metadata/UI
+first (this section), then a DACP remote-control client for real transport
+controls, then DACP volume sync last (the most protocol-uncertain piece) -
+DACP research (see below) showed real complexity worth de-risking
+incrementally rather than building all four stages at once.
+
+iOS pushes track metadata via `SET_PARAMETER`, distinguished by
+`Content-Type`: `application/x-dmap-tagged` (title/artist/album, DMAP-tagged
+binary) or an image type (`image/jpeg`/`image/png`, raw artwork bytes) -
+previously ignored entirely (200 OK, body never read). Checked
+shairport-sync's `handle_set_parameter_metadata`: despite DMAP/DAAP
+supporting arbitrary nested containers, RAOP only ever sends one flat
+(4-byte tag, 4-byte length, value) sequence after an 8-byte header, so
+`DmapParser.kt` mirrors exactly that rather than a full recursive DMAP
+parser - just extracts `minm`/`asar`/`asal` (title/artist/album). Artwork is
+decoded directly via `BitmapFactory.decodeByteArray`, no parsing needed.
+Results are pushed up through a callback (`RaopRtspServer` constructor ->
+`AirplayAdvertiseService`) that rebuilds the foreground notification with
+`setContentTitle`/`setContentText`/`setLargeIcon`. No `Notification.MediaStyle`
+(API 21+, and this project avoids AndroidX/support libraries) - a plain
+`Notification.Builder` with a large-icon artwork is a reasonable substitute
+for a receive-only speaker showing "what's playing," informational only
+(no transport buttons yet).
+
+**Bug found during testing**: first real-device test (YT Music as source)
+showed title/artist/album parsing correctly, but no artwork ever appeared in
+the notification - despite logs proving the artwork *did* decode
+successfully (`Artwork decoded: 512x512`, from a 180KB `image/jpeg` body).
+Root cause: the code assumed text metadata always arrives before artwork per
+track, and unconditionally wiped `artwork` back to `null` whenever a new
+text-metadata block arrived, "to avoid showing a stale cover." In this real
+session, YT Music sent the image *before* the text metadata (opposite order
+from that assumption), so the freshly-decoded artwork got discarded 170ms
+after being set, by our own code, every time. Fixed by preserving existing
+artwork across text-metadata updates instead of clearing it - accepting the
+minor tradeoff that a brand new track's text can very briefly show the
+previous track's cover until its own artwork arrives, which is far less bad
+than guaranteed-never-showing artwork at all. Retested and confirmed working.
+
+**DACP research (for the next two stages)**: real remote-control commands
+(play/pause/next/prev, and especially volume) go over HTTP to a service the
+iPhone exposes, discovered via mDNS-*browsing* (not advertising) for
+`_dacp._tcp`, matching a service instance named `iTunes_Ctrl_<DACP-ID>`
+where `DACP-ID` is a header value the client sends in `SETUP` (currently not
+captured - `Active-Remote`, the header value required on every DACP request,
+isn't captured either). Commands are simple
+(`GET /ctrl-int/1/<command> HTTP/1.1` with an `Active-Remote:` header) for
+play/pause/next/prev, but shairport-sync's volume handling is materially
+more complex: it's not "set volume to X" but a multi-room-aware protocol
+that queries a whole connected-speaker list, matches this device's own
+entry by a machine-number derived from its MAC/deviceid, and computes a
+relative-volume conversion - designed for scenarios with several AirPlay
+receivers active at once. Whether a simpler direct path exists for a
+single-speaker session is still unconfirmed; that uncertainty is exactly why
+volume sync was sequenced last.
+
 ## Build environment used for this scaffold
 - JDK: Android Studio's bundled JBR (`Android Studio/jbr`, OpenJDK 21.0.8) —
   used explicitly via `JAVA_HOME`, since the system `java` on PATH resolves to

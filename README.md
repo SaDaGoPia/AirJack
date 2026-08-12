@@ -4,20 +4,22 @@ Turns a Samsung SM-G357FZ (Galaxy Ace 4 / Ace Style LTE, Android 4.4.4 / API 19)
 into an AirPlay speaker over its 3.5mm headphone jack. See [docs/decisions.md](docs/decisions.md)
 for the toolchain research and architecture decisions behind this setup.
 
-## Status: reconnect handling + packet-loss recovery
+## Status: Now Playing metadata + artwork
 
-Verified end-to-end against a real iPhone on 2026-08-12, including an actual
-WiFi drop mid-playback: the RTSP connection dies without a clean TEARDOWN
-(caught and cleaned up), the mDNS advertisement pauses, and once WiFi comes
-back it re-advertises against the new IP automatically - no app restart
-needed, no manual replay of the mDNS registration by the user. The speaker
-was selectable and played again immediately after reconnecting.
+Verified end-to-end against a real iPhone on 2026-08-12: the notification
+shows the current track's title/artist/album and cover art, parsed from the
+metadata iOS pushes over `SET_PARAMETER` during playback. Informational only
+for now - no transport (play/pause/skip) or volume controls yet. Those need
+a DACP remote-control client (a separate HTTP-based protocol the iPhone
+exposes), planned as the next two stages - see decisions doc for the
+research behind why that's sequenced last.
 
-Also implemented: RTP resend/retransmit for lost packets - gaps in the audio
-sequence stream trigger a resend request to the iPhone's control port, and
-the recovered packet plays as soon as it arrives. Verified on real hardware
-mid-playback (logged real gaps being detected and recovered). NTP-style
-clock sync was deliberately skipped - see decisions doc for why.
+Also done: WiFi drop/reconnect handling (mDNS re-advertises automatically
+once WiFi returns, dead connections get cleaned up on a timeout) and RTP
+resend/retransmit for lost packets (gaps in the audio sequence trigger a
+recovery request to the iPhone). Both verified on real hardware. NTP-style
+clock sync was deliberately skipped in favor of resend/retransmit - see
+decisions doc for why.
 
 ## Build
 
