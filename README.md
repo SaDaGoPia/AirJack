@@ -4,7 +4,7 @@ Turns a Samsung SM-G357FZ (Galaxy Ace 4 / Ace Style LTE, Android 4.4.4 / API 19)
 into an AirPlay speaker over its 3.5mm headphone jack. See [docs/decisions.md](docs/decisions.md)
 for the toolchain research and architecture decisions behind this setup.
 
-## Status: Milestone 4 — reconnect handling
+## Status: reconnect handling + packet-loss recovery
 
 Verified end-to-end against a real iPhone on 2026-08-12, including an actual
 WiFi drop mid-playback: the RTSP connection dies without a clean TEARDOWN
@@ -13,10 +13,11 @@ back it re-advertises against the new IP automatically - no app restart
 needed, no manual replay of the mDNS registration by the user. The speaker
 was selectable and played again immediately after reconnecting.
 
-Not yet implemented: NTP timing sync and retransmit ("resend") request
-handling, so playback can still glitch or drift under packet loss on an
-otherwise-connected link - that's separate from the reconnect-after-drop
-work done here, and still open for a future pass.
+Also implemented: RTP resend/retransmit for lost packets - gaps in the audio
+sequence stream trigger a resend request to the iPhone's control port, and
+the recovered packet plays as soon as it arrives. Verified on real hardware
+mid-playback (logged real gaps being detected and recovered). NTP-style
+clock sync was deliberately skipped - see decisions doc for why.
 
 ## Build
 

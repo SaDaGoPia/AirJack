@@ -8,6 +8,7 @@ import android.util.Log
 import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
@@ -19,12 +20,13 @@ private const val TAG = "RaopRtspServer"
 
 /**
  * Accepts the RTSP handshake (OPTIONS/ANNOUNCE/SETUP/RECORD/...) on
- * RaopConstants.RTSP_PORT, derives the per-session AES key/IV, and - as of
- * milestone 3 - decrypts, ALAC-decodes, and plays each incoming RTP audio
- * packet through AudioTrack. Does NOT yet respond to NTP timing sync or
- * retransmit ("resend") requests, so playback can glitch/drift under packet
- * loss or on an imperfect WiFi link - that's follow-up work, not needed to
- * prove basic playback works.
+ * RaopConstants.RTSP_PORT, derives the per-session AES key/IV, decrypts,
+ * ALAC-decodes, and plays each incoming RTP audio packet through AudioTrack,
+ * and requests retransmission of lost packets over the control channel.
+ * Does NOT implement NTP-style clock sync (the timing channel) - that's
+ * mainly for long-session clock drift correction between sender and
+ * receiver, which basic local playback here doesn't depend on; skipped as
+ * disproportionate effort for this single-device setup (see decisions doc).
  */
 class RaopRtspServer(private val deviceIdHex: String) {
 
@@ -82,6 +84,14 @@ private class RaopConnectionHandler(
     private var timingSocket: DatagramSocket? = null
     private var alacDecoder: AlacDecoder? = null
     private var audioTrack: AudioTrack? = null
+    private var clientAddress: InetAddress? = null
+    private var clientControlPort: Int = 0
+    private var expectedSeqno: Int = -1 // -1 = not yet initialized (no packet seen yet)
+
+    companion object {
+        /** Bigger gaps than this are treated as a stream restart/reorder, not loss - don't chase them. */
+        private const val MAX_RESEND_GAP = 32
+    }
 
     override fun run() {
         Log.i(TAG, "Connection from ${socket.inetAddress.hostAddress}")
@@ -222,6 +232,8 @@ private class RaopConnectionHandler(
         if (clientControlPort == null || clientTimingPort == null) {
             return RtspProtocol.buildResponse(451, "Invalid Parameters", cseq)
         }
+        clientAddress = socket.inetAddress
+        this.clientControlPort = clientControlPort
 
         val audio = DatagramSocket(0)
         val control = DatagramSocket(0)
@@ -272,9 +284,9 @@ private class RaopConnectionHandler(
         val minBufferSize = AudioTrack.getMinBufferSize(
             sampleRate, channelConfig, AudioFormat.ENCODING_PCM_16BIT
         )
-        // Generous headroom over the minimum: we don't yet implement the NTP
-        // timing/resend channels, so a bigger buffer absorbs WiFi jitter
-        // rather than underrunning (audible dropouts) on every small delay.
+        // Generous headroom over the minimum: we don't implement NTP clock
+        // sync, so a bigger buffer absorbs WiFi jitter rather than
+        // underrunning (audible dropouts) on every small delay.
         val bufferSize = maxOf(minBufferSize, 4096) * 4
         @Suppress("DEPRECATION") // AudioTrack.Builder needs API 23+; this app's minSdk is 19
         val track = AudioTrack(
@@ -311,14 +323,28 @@ private class RaopConnectionHandler(
         thread.start()
     }
 
-    /** RTP header is 12 bytes: version/flags, marker+payload type, seqno(2), timestamp(4), SSRC(4). */
+    /**
+     * RTP header is 12 bytes: version/flags, marker+payload type, seqno(2),
+     * timestamp(4), SSRC(4). Resent packets (type 0x56, arriving on this same
+     * audio socket in response to a resend request) carry an extra 4-byte
+     * wrapper before that same 12-byte header.
+     */
     private fun handleAudioPacket(data: ByteArray, length: Int) {
         if (length <= 12) return
         val payloadType = data[1].toInt() and 0x7F
-        if (payloadType != 0x60) return // only regular audio data (96); resends unhandled for now
+        val headerOffset = when (payloadType) {
+            0x60 -> 0 // regular audio data
+            0x56 -> 4 // resent audio data - extra 4-byte prefix before the RTP header
+            else -> return
+        }
+        if (length <= 12 + headerOffset) return
+
+        val seqno = ((data[headerOffset + 2].toInt() and 0xFF) shl 8) or
+            (data[headerOffset + 3].toInt() and 0xFF)
+        if (payloadType == 0x60) trackSequence(seqno)
 
         val decoder = alacDecoder ?: return
-        val payload = data.copyOfRange(12, length)
+        val payload = data.copyOfRange(headerOffset + 12, length)
         val key = aesKey
         val iv = aesIv
         val alacFrame = if (key != null && iv != null) decryptAudio(payload, key, iv) else payload
@@ -328,6 +354,51 @@ private class RaopConnectionHandler(
             audioTrack?.write(pcm, 0, pcm.size)
         } catch (e: Exception) {
             Log.e(TAG, "ALAC decode/playback failed", e)
+        }
+    }
+
+    /**
+     * Detects gaps in the regular-audio sequence number stream and requests
+     * retransmission of anything missing. Resent packets are played as soon
+     * as they arrive rather than being reinserted in order - there's no
+     * jitter/reorder buffer here, so a very late resend can play slightly
+     * out of order. That's a minor, rare artifact compared to the permanent
+     * silent gap that not requesting a resend at all would leave.
+     */
+    private fun trackSequence(seqno: Int) {
+        if (expectedSeqno == -1) {
+            expectedSeqno = (seqno + 1) and 0xFFFF
+            return
+        }
+        val gap = (seqno - expectedSeqno) and 0xFFFF
+        when {
+            gap == 0 -> expectedSeqno = (seqno + 1) and 0xFFFF
+            gap in 1..MAX_RESEND_GAP -> {
+                sendResendRequest(expectedSeqno, gap)
+                expectedSeqno = (seqno + 1) and 0xFFFF
+            }
+            // else: seqno is behind expected (duplicate, reordered, or a huge
+            // gap suggesting a stream restart) - leave expectedSeqno alone.
+        }
+    }
+
+    private fun sendResendRequest(firstMissingSeqno: Int, count: Int) {
+        val address = clientAddress ?: return
+        val control = controlSocket ?: return
+        if (clientControlPort == 0) return
+        try {
+            val req = ByteArray(8)
+            req[0] = 0x80.toByte()
+            req[1] = 0xD5.toByte() // classic RAOP 'resend' (marker bit set on type 0x55)
+            req[2] = 0; req[3] = 1 // our own sequence number for this request - always 1
+            req[4] = (firstMissingSeqno shr 8).toByte()
+            req[5] = firstMissingSeqno.toByte()
+            req[6] = (count shr 8).toByte()
+            req[7] = count.toByte()
+            control.send(DatagramPacket(req, req.size, address, clientControlPort))
+            Log.i(TAG, "Requested resend of $count packet(s) from seqno $firstMissingSeqno")
+        } catch (e: IOException) {
+            Log.w(TAG, "Failed to send resend request: ${e.message}")
         }
     }
 

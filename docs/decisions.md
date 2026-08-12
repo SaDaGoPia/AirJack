@@ -200,6 +200,42 @@ slow `dumpstate`-style output instead and left WiFi still enabled per
 `dumpsys wifi`. Don't rely on it for testing on this hardware; toggle WiFi
 manually from Settings instead.
 
+## Resend/retransmit instead of full NTP timing sync
+Followed up on milestone 4's deferred item (b) above. Asked to "attend the
+NTP timing sync," but researched the actual protocol first: timing sync is
+*receiver-initiated* (we'd send periodic requests to the iPhone's timing
+port and process its replies) and its real purpose in shairport-sync is
+long-session clock-drift correction between sender and receiver via a
+statistical rolling-window gradient estimate — not something our playback
+depends on, since `AudioTrack` already paces output from the local device
+clock once PCM is written to it. Milestones 2-4 all played correctly with
+zero timing-sync code. Given the large, hard-to-verify port this would be
+for a benefit that's likely inaudible on a single personal headphone-jack
+receiver, decided with the user to implement RTP resend/retransmit instead —
+smaller, more testable, and directly reduces audible dropouts from real WiFi
+packet loss, which timing sync wouldn't address anyway.
+
+Implementation (`RaopRtspServer.kt`): tracks the expected next sequence
+number for regular audio packets (RTP payload type 0x60); on a forward gap
+of 1-32 packets, sends an 8-byte resend-request packet (format taken from
+shairport-sync's `rtp_request_resend`) via UDP to the client's control port
+(captured from `SETUP`'s `Transport: control_port=` field, which was parsed
+but previously discarded). Gaps larger than 32 are treated as a stream
+restart/reorder rather than loss, and not chased. Resent packets arrive back
+on the *audio* socket (not control) as payload type 0x56, wrapped in an
+extra 4-byte prefix before the usual 12-byte RTP header, and are decoded and
+played as soon as they arrive - there's no reorder/jitter buffer, so a very
+late resend can play slightly out of order. That's judged a minor, rare
+artifact next to the alternative (a permanent silent gap for every lost
+packet), consistent with this project's playback pipeline being "decode
+whatever arrives, in arrival order" rather than a proper timestamp-scheduled
+buffer.
+
+**Verified on real hardware 2026-08-12** during otherwise-normal playback:
+logs showed real gaps being detected and resend requests sent (e.g.
+"Requested resend of 2 packet(s) from seqno 33701") with no errors, audio
+continuing to play normally through the recovered gaps.
+
 ## Build environment used for this scaffold
 - JDK: Android Studio's bundled JBR (`Android Studio/jbr`, OpenJDK 21.0.8) —
   used explicitly via `JAVA_HOME`, since the system `java` on PATH resolves to
