@@ -175,7 +175,7 @@ class AirplayAdvertiseService : Service() {
 
     private fun buildNotification(info: NowPlayingInfo = NowPlayingInfo()): Notification {
         val builder = Notification.Builder(this)
-            .setSmallIcon(R.drawable.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
         if (info.isEmpty) {
             builder.setContentTitle(getString(R.string.app_name))

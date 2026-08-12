@@ -4,13 +4,15 @@ Turns a Samsung SM-G357FZ (Galaxy Ace 4 / Ace Style LTE, Android 4.4.4 / API 19)
 into an AirPlay speaker over its 3.5mm headphone jack. See [docs/decisions.md](docs/decisions.md)
 for the toolchain research and architecture decisions behind this setup.
 
-## Status: volume sync (one direction) + Now Playing metadata/artwork
+## Status: volume sync (one direction) + Now Playing metadata/artwork + Musicolet-style UI
 
 Verified end-to-end against a real iPhone on 2026-08-12: the notification
 shows the current track's title/artist/album and cover art, and the
 iPhone's own AirPlay volume slider/buttons now control the Ace4's actual
 output volume, with the Ace4's on-screen "media volume" indicator staying
-in sync too.
+in sync too. The Now Playing view has been redesigned dark-themed and
+minimal (Musicolet-inspired), and the app/notification icons are a small
+generated glyph instead of the original placeholder shape.
 
 Not working, and not expected to start working without a change on Apple's
 side: pushing the Ace4's volume-button presses back to the iPhone (DACP

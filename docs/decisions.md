@@ -395,6 +395,45 @@ set via `android:textCursorDrawable` so the blinking cursor matches too.
 and teal status text all render correctly; toggling Start/Stop shows and hides
 the status text as expected with no layout issues.
 
+## App icon + notification icon: generated glyph, not a photo/logo
+Replaced the placeholder blue-circle `ic_launcher.xml` shape (used for both
+the launcher icon and the notification's small icon) per the user's ask for
+"a small and clean app icon... the app and the notification and stuff."
+
+**Why a generated PNG, not another XML shape or a vector drawable**: this
+project targets a real API 19 device with no AndroidX. Framework-level icon
+rendering (the launcher reading `android:icon`, the status bar reading
+`setSmallIcon`) only gained native `<vector>` XML support in API 21 - a
+`<vector>` drawable used directly for either of these on real KitKat would
+render blank/crash, not just look wrong, since the OS itself (not app code)
+has to parse the resource. A flat `<shape>` (rect/oval/ring primitives only)
+can't express a real glyph. Used Python + Pillow (installed into the local
+environment for this one task) to draw a simple "broadcast waves" glyph -
+three concentric arcs opening upward over a small dot, evoking audio being
+cast outward - then exported to plain PNGs at each density bucket, matching
+how the rest of Android's density system expects icons to be supplied
+(`mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher.png`,
+`drawable-{m,h,xh,xxh,xxxh}dpi/ic_notification.png`). `ic_launcher.xml` was
+deleted rather than left alongside the new PNGs.
+
+**Two distinct assets, not one reused for both purposes**, because the two
+contexts have opposite rendering rules: a launcher icon should be full-color
+(drawn on a deep teal-black `#0F1E1B` rounded-square background matching the
+app's teal accent), while a status-bar/notification small icon must be a
+pure white silhouette on a transparent background per Android's long-standing
+guideline - the previous code reused the full-color launcher shape for both,
+which is exactly the kind of thing that renders as an ugly solid box on some
+OEM status bars (this project already hit one Samsung-TouchWiz-specific
+rendering quirk with notification buttons earlier - see above). Wired via
+`AndroidManifest.xml`'s `android:icon="@mipmap/ic_launcher"` and
+`AirplayAdvertiseService.kt`'s `setSmallIcon(R.drawable.ic_notification)`.
+
+**Verified on real hardware 2026-08-12**: app-drawer screenshot shows the
+teal glyph rendering cleanly at real device density; starting the foreground
+service shows the same glyph as a correctly-rendered white silhouette in both
+the status bar and the pulled-down notification shade, with no resource
+errors in logcat.
+
 ## Build environment used for this scaffold
 - JDK: Android Studio's bundled JBR (`Android Studio/jbr`, OpenJDK 21.0.8) —
   used explicitly via `JAVA_HOME`, since the system `java` on PATH resolves to
