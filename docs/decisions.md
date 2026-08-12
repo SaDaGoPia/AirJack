@@ -293,6 +293,74 @@ receivers active at once. Whether a simpler direct path exists for a
 single-speaker session is still unconfirmed; that uncertainty is exactly why
 volume sync was sequenced last.
 
+## Transport controls + volume sync: two dead ends, one working path
+Continuation of the Now Playing work - the user wanted hardware volume
+buttons synced with the iPhone's AirPlay volume (two-way), plus real
+play/pause/next/prev controls in the notification. Three things were tried;
+two turned out to be real walls, not bugs to fix.
+
+**Notification/lock-screen transport buttons: reverted, not proven possible
+on this device.** Tried twice: (1) plain `Notification.Builder.addAction()`
+buttons with `BigTextStyle` for a bigger expanded notification - never
+rendered, even fully expanded. (2) `RemoteControlClient` (the correct
+pre-MediaSession, API<21 API for lock-screen/media controls, with a
+manifest-registered `MediaButtonReceiver` for `ACTION_MEDIA_BUTTON`) -
+also never rendered. Real device logs mentioned a Samsung TouchWiz "Mini
+Controller" widget specifically for media notifications, which neither
+approach seems to trigger. Both attempts fully reverted (`MediaButtonReceiver.kt`
+removed, manifest receiver removed, RemoteControlClient registration removed) -
+no dead code left in place for a feature that doesn't work.
+
+**DACP volume push (Ace4 buttons -> iPhone): reverted, looks genuinely
+blocked by iOS, not a bug in our request.** Implemented `DacpClient.kt`
+(mDNS-browse `_dacp._tcp`, matching `iTunes_Ctrl_<DACP-ID>`, then
+`GET /ctrl-int/1/setproperty?include-speaker-id=<machine>&dmcp.volume=<pct>`
+per shairport-sync's `dacp_set_include_speaker_volume` - the single-speaker
+case only, per earlier research). Discovery worked (found the DACP port
+every time), and the request format matched the reference implementation
+exactly (confirmed via full request/response logging), but iOS consistently
+returned `400 Bad Request` with an empty body for every single attempt,
+regardless of the volume value sent - a blanket rejection, not a
+parameter-specific error. DACP is an undocumented, reverse-engineered
+protocol (Apple has never published a spec), and there's independent
+evidence Apple has been tightening programmatic volume control on iOS over
+time (e.g. Spotify Connect losing the ability to intercept iPhone volume
+buttons after Apple removed the private API it relied on, iOS 17.3-ish).
+Concluded this is a real platform restriction, not something fixable from
+the receiver side. `DacpClient.kt` and all its call sites were removed
+entirely once both of its only two callers (this and the transport buttons
+above) were gone - vs. leaving a client with no working command that could
+plausibly be sent.
+
+**iOS volume slider -> Ace4's actual output: works, kept.** This direction
+doesn't depend on Apple's cooperation - iOS already sends `SET_PARAMETER`
+`text/parameters` with `volume: X` (dB attenuation, 0.0 = max, -144.0 =
+mute) during playback; the receiver just wasn't acting on it yet. Fixed in
+two passes:
+1. Apply the actual audio gain via `AudioTrack.setStereoVolume` (dB -> linear
+   gain via the standard `10^(dB/20)` conversion). Confirmed working - audio
+   audibly changes - but the Android system's own "media volume" indicator
+   stayed stale, since track-level gain is a separate value from the
+   `STREAM_MUSIC` index the system slider displays.
+2. Mirror the change into `AudioManager.setStreamVolume` so the two stay in
+   sync visually. Doing this with the *same* exponential gain value produced
+   uneven, sometimes-invisible steps on Android's small integer index range
+   (e.g. 0-15) - iOS sends evenly-spaced dB steps per button press, and
+   pushing those through an exponential curve onto ~16 discrete slots
+   compresses/stretches the step size depending where you are in the range.
+   Fixed by mapping the on-screen index *linearly* from dB directly (assuming
+   iOS's typical 0 to -30dB range) instead of routing it through the same
+   gain curve used for actual audio - keeps each iPhone button press to
+   roughly one visible step, "as default and intuitive as possible" per the
+   user's ask. A residual rough edge remains: iOS reports dB values with
+   small floating-point noise (e.g. `-14.374999` instead of a clean
+   `-14.375`), which can occasionally round to the wrong side of a step
+   boundary and require an extra press at specific points in the range -
+   judged an acceptable, likely-unavoidable quantization artifact from
+   mapping one discrete step scale onto a different, coarser one, not worth
+   chasing further given the core functionality (correct audio, synced
+   indicator, near-1:1 stepping) already works well.
+
 ## Build environment used for this scaffold
 - JDK: Android Studio's bundled JBR (`Android Studio/jbr`, OpenJDK 21.0.8) —
   used explicitly via `JAVA_HOME`, since the system `java` on PATH resolves to

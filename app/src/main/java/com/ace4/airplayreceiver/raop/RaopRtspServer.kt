@@ -23,14 +23,23 @@ private const val TAG = "RaopRtspServer"
  * Accepts the RTSP handshake (OPTIONS/ANNOUNCE/SETUP/RECORD/...) on
  * RaopConstants.RTSP_PORT, derives the per-session AES key/IV, decrypts,
  * ALAC-decodes, and plays each incoming RTP audio packet through AudioTrack,
- * and requests retransmission of lost packets over the control channel.
+ * requests retransmission of lost packets over the control channel, and
+ * applies iOS-sent volume changes locally (both the actual playback gain and
+ * the system "media volume" indicator, kept in sync for a coherent UI).
  * Does NOT implement NTP-style clock sync (the timing channel) - that's
  * mainly for long-session clock drift correction between sender and
  * receiver, which basic local playback here doesn't depend on; skipped as
  * disproportionate effort for this single-device setup (see decisions doc).
+ * Also does NOT push local volume changes back to iOS via DACP - tried and
+ * reverted: iOS consistently rejected the request with 400 Bad Request. DACP
+ * is an undocumented, reverse-engineered protocol, and there's independent
+ * evidence Apple has been tightening programmatic volume control on iOS in
+ * general, so this looks like a real platform restriction rather than a bug
+ * in our request (see decisions doc).
  */
 class RaopRtspServer(
     private val deviceIdHex: String,
+    private val audioManager: AudioManager,
     private val onNowPlayingChanged: (NowPlayingInfo) -> Unit = {}
 ) {
 
@@ -47,7 +56,7 @@ class RaopRtspServer(
             while (running) {
                 try {
                     val socket = server.accept()
-                    val handler = RaopConnectionHandler(socket, deviceIdHex, onNowPlayingChanged)
+                    val handler = RaopConnectionHandler(socket, deviceIdHex, audioManager, onNowPlayingChanged)
                     Thread(handler, "RaopConn-${socket.inetAddress.hostAddress}").apply {
                         isDaemon = true
                         start()
@@ -78,6 +87,7 @@ class RaopRtspServer(
 private class RaopConnectionHandler(
     private val socket: Socket,
     private val deviceIdHex: String,
+    private val audioManager: AudioManager,
     private val onNowPlayingChanged: (NowPlayingInfo) -> Unit
 ) : Runnable {
 
@@ -283,12 +293,11 @@ private class RaopConnectionHandler(
     }
 
     /**
-     * iOS pushes track metadata and artwork as separate SET_PARAMETER
-     * requests during playback, distinguished by Content-Type:
-     * application/x-dmap-tagged (title/artist/album) or an image type like
-     * image/jpeg (cover art).
-     * Volume/progress (text/parameters) isn't handled yet - that's part of
-     * the DACP volume-sync work, not this pass.
+     * iOS pushes track metadata, artwork, and volume/progress as separate
+     * SET_PARAMETER requests during playback, distinguished by Content-Type:
+     * application/x-dmap-tagged (title/artist/album), an image type like
+     * image/jpeg (cover art), or text/parameters (volume/progress key-value
+     * text, e.g. "volume: -12.5").
      */
     private fun handleSetParameter(req: RtspRequest, cseq: String?): ByteArray {
         val contentType = req.header("Content-Type")
@@ -324,9 +333,53 @@ private class RaopConnectionHandler(
                     Log.w(TAG, "Artwork Content-Type but decodeByteArray returned null (${req.body.size} bytes)")
                 }
             }
+            contentType.startsWith("text/parameters") -> handleSetParameterText(req)
             else -> Log.d(TAG, "Unhandled SET_PARAMETER Content-Type: $contentType")
         }
         return RtspProtocol.buildResponse(200, "OK", cseq)
+    }
+
+    /**
+     * "volume: X" carries iOS's desired output level as dB attenuation -
+     * 0.0 is unity gain (max), negative values attenuate down to iOS's own
+     * floor around -30.0 dB, and -144.0 (or anything very negative) means
+     * mute.
+     *
+     * Two separate mappings from that one dB value, deliberately different:
+     * - Actual audio gain: 10^(dB/20), the standard (exponential) dB-to-linear
+     *   conversion, since that's the perceptually-correct curve for loudness -
+     *   applied via AudioTrack.setStereoVolume (the API19-era volume control;
+     *   the single-argument setVolume(float) needs API 21+).
+     * - The on-screen "media volume" index: mapped *linearly* from dB instead
+     *   of through that same exponential gain. iOS sends evenly-spaced dB
+     *   steps per button press; feeding the exponential gain into Android's
+     *   small integer index range (e.g. 0-15) compresses/stretches those
+     *   steps unevenly depending where you are in the range, so one iPhone
+     *   button press could jump the indicator by zero or several steps.
+     *   Mapping dB directly keeps each press to one even step, matching the
+     *   default, intuitive feel of a normal volume control.
+     */
+    private fun handleSetParameterText(req: RtspRequest) {
+        val text = String(req.body, Charsets.US_ASCII)
+        for (line in text.split("\r\n", "\n")) {
+            if (!line.startsWith("volume:")) continue
+            val db = line.removePrefix("volume:").trim().toFloatOrNull() ?: continue
+            val gain = if (db <= -144f) 0f else Math.pow(10.0, (db / 20.0)).toFloat().coerceIn(0f, 1f)
+            try {
+                @Suppress("DEPRECATION") // setVolume(float) needs API 21+
+                audioTrack?.setStereoVolume(gain, gain)
+
+                val streamMax = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                val dbFloor = -30f // iOS's typical quietest non-mute level
+                val linearFraction = if (db <= -144f) 0f else ((db.coerceIn(dbFloor, 0f) - dbFloor) / -dbFloor)
+                val streamIndex = Math.round(linearFraction * streamMax)
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, streamIndex, 0)
+
+                Log.i(TAG, "SET_PARAMETER: volume $db dB -> gain $gain, stream index $streamIndex/$streamMax")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to apply volume", e)
+            }
+        }
     }
 
     private fun createAudioTrack(decoder: AlacDecoder?): AudioTrack {

@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.AudioManager
 import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.HandlerThread
@@ -90,7 +91,8 @@ class AirplayAdvertiseService : Service() {
 
                 // Start the RTSP listener before advertising over mDNS, so the
                 // port is already accepting connections by the time iOS can see us.
-                val server = RaopRtspServer(deviceId) { info -> updateNotification(info) }
+                val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                val server = RaopRtspServer(deviceId, audioManager) { info -> updateNotification(info) }
                 server.start()
                 rtspServer = server
 

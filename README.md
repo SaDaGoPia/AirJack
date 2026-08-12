@@ -4,15 +4,22 @@ Turns a Samsung SM-G357FZ (Galaxy Ace 4 / Ace Style LTE, Android 4.4.4 / API 19)
 into an AirPlay speaker over its 3.5mm headphone jack. See [docs/decisions.md](docs/decisions.md)
 for the toolchain research and architecture decisions behind this setup.
 
-## Status: Now Playing metadata + artwork
+## Status: volume sync (one direction) + Now Playing metadata/artwork
 
 Verified end-to-end against a real iPhone on 2026-08-12: the notification
-shows the current track's title/artist/album and cover art, parsed from the
-metadata iOS pushes over `SET_PARAMETER` during playback. Informational only
-for now - no transport (play/pause/skip) or volume controls yet. Those need
-a DACP remote-control client (a separate HTTP-based protocol the iPhone
-exposes), planned as the next two stages - see decisions doc for the
-research behind why that's sequenced last.
+shows the current track's title/artist/album and cover art, and the
+iPhone's own AirPlay volume slider/buttons now control the Ace4's actual
+output volume, with the Ace4's on-screen "media volume" indicator staying
+in sync too.
+
+Not working, and not expected to start working without a change on Apple's
+side: pushing the Ace4's volume-button presses back to the iPhone (DACP
+requests are consistently rejected with 400 Bad Request - looks like a real
+iOS-side restriction, not a bug here), and transport/volume controls in the
+notification or lock screen (tried two different Android APIs for this;
+neither rendered on this Samsung TouchWiz build). Both attempts were
+reverted rather than left half-working - see decisions doc for the full
+investigation.
 
 Also done: WiFi drop/reconnect handling (mDNS re-advertises automatically
 once WiFi returns, dead connections get cleaned up on a timeout) and RTP
