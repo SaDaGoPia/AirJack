@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AirPlay Receiver</string>
+    <string name="status_stopped">Stopped</string>
+    <string name="status_starting">Starting…</string>
+    <string name="status_advertising">Advertising as AirPlay speaker</string>
+    <string name="status_error">Error — check WiFi connection</string>
+    <string name="btn_start">Start</string>
+    <string name="btn_stop">Stop</string>
+    <string name="label_device_name">Speaker name</string>
+    <string name="default_device_name">Galaxy Ace 4</string>
+</resources>
