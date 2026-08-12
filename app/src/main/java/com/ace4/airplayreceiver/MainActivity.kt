@@ -42,13 +42,15 @@ class MainActivity : Activity() {
 
     private fun onStatusChanged(status: Int) {
         isRunning = status == AirplayAdvertiseService.STATUS_STARTING ||
-            status == AirplayAdvertiseService.STATUS_ADVERTISING
+            status == AirplayAdvertiseService.STATUS_ADVERTISING ||
+            status == AirplayAdvertiseService.STATUS_RECONNECTING
         btnToggle.text = getString(if (isRunning) R.string.btn_stop else R.string.btn_start)
         textStatus.text = getString(
             when (status) {
                 AirplayAdvertiseService.STATUS_STARTING -> R.string.status_starting
                 AirplayAdvertiseService.STATUS_ADVERTISING -> R.string.status_advertising
                 AirplayAdvertiseService.STATUS_ERROR -> R.string.status_error
+                AirplayAdvertiseService.STATUS_RECONNECTING -> R.string.status_reconnecting
                 else -> R.string.status_stopped
             }
         )

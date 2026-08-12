@@ -147,6 +147,59 @@ upstream, keep this padding in place — it's a property of how the bit reader
 works, not something a newer upstream version is likely to have fixed (it's
 correct behavior in the file-decoding context the library was built for).
 
+## Milestone 4 scope: reconnect handling only, not timing sync/resend
+Milestone 3 left two separate robustness gaps: (a) no handling for WiFi
+drops/iPhone disconnects — the original milestone 4 per the project brief,
+and (b) no NTP timing sync or RTP retransmit ("resend") handling, so
+playback can glitch under packet loss even on a stable link. Decided to
+scope milestone 4 to (a) only and leave (b) for a later pass — they're
+fairly orthogonal (one is "recover when connectivity comes back," the other
+is "handle loss while connectivity is fine"), and combining them risked a
+harder-to-test, harder-to-review change.
+
+Two failure modes handled:
+1. **WiFi drop/reconnect** (`AirplayAdvertiseService.kt`): a `BroadcastReceiver`
+   for the legacy `android.net.conn.CONNECTIVITY_CHANGE` action (not
+   `ConnectivityManager.NetworkCallback`, which needs API 21+) is registered
+   while advertising. On a network change it compares the phone's current
+   WiFi IP against the one last handed to JmDNS. If WiFi dropped entirely,
+   the advertiser is torn down (a JmDNS instance bound to a dead address
+   can't recover on its own) and status goes to a new `STATUS_RECONNECTING`.
+   If the IP changed (reconnected, possibly to a different address), the
+   advertiser restarts against the new address automatically. The RTSP
+   `ServerSocket` itself needs no restart — it's bound to the wildcard
+   address, not a specific IP, so it keeps accepting connections through an
+   IP change without help.
+2. **Dead RTSP connections**: added a 30s `SO_TIMEOUT` on the accepted RTSP
+   socket. Real sessions send RTSP traffic (OPTIONS/SET_PARAMETER keepalives)
+   every few seconds during playback per observed logs, so 30s of total
+   silence reliably means the client is gone (WiFi loss, app killed, out of
+   range) rather than just idle. Without this, a socket read blocks forever
+   with no way to detect the client vanished without a clean TEARDOWN.
+
+Also switched `onStartCommand` from `START_NOT_STICKY` to `START_STICKY`:
+this is a 1GB RAM device where the foreground service is a real candidate
+for being killed under memory pressure. `START_STICKY` only redelivers a
+restart Intent after the system kills a still-wanted service — Android
+tracks explicit `stopSelf()`/`stopService()` separately and won't restart
+after those, so this doesn't fight the user's own Stop button.
+
+**Verified on real hardware 2026-08-12**, and the test caught both failure
+modes in one natural sequence without needing to force either separately:
+two sessions played and ended with clean `TEARDOWN`, then a third was cut
+off mid-stream by an actual WiFi drop (`Connection ended: recvfrom failed:
+ETIMEDOUT` — no TEARDOWN at all), which the existing generic `IOException`
+catch/cleanup handled with no crash or leaked `AudioTrack`/UDP sockets. The
+WiFi-drop detector fired independently ~0.5s later, paused advertising, and
+re-advertised cleanly ~5s after WiFi came back. The speaker was selectable
+and played again immediately.
+
+**Tooling note**: `adb shell svc wifi disable` does not behave as a clean
+WiFi toggle on this device's Samsung KitKat build — it triggered a large,
+slow `dumpstate`-style output instead and left WiFi still enabled per
+`dumpsys wifi`. Don't rely on it for testing on this hardware; toggle WiFi
+manually from Settings instead.
+
 ## Build environment used for this scaffold
 - JDK: Android Studio's bundled JBR (`Android Studio/jbr`, OpenJDK 21.0.8) —
   used explicitly via `JAVA_HOME`, since the system `java` on PATH resolves to

@@ -10,6 +10,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -86,6 +87,12 @@ private class RaopConnectionHandler(
         Log.i(TAG, "Connection from ${socket.inetAddress.hostAddress}")
         try {
             socket.tcpNoDelay = true
+            // Detect a silently dead connection (iPhone drops off WiFi, app
+            // killed, etc. - no TCP FIN, no TEARDOWN) instead of blocking here
+            // forever. Real sessions send RTSP traffic (OPTIONS/SET_PARAMETER
+            // keepalives) every few seconds during playback, so 30s of total
+            // silence reliably means the client is gone.
+            socket.soTimeout = 30_000
             val output = socket.getOutputStream()
             val reader = RtspLineReader(socket.getInputStream())
             while (!socket.isClosed) {
@@ -96,6 +103,8 @@ private class RaopConnectionHandler(
                 output.flush()
                 if (req.method == "TEARDOWN") break
             }
+        } catch (e: SocketTimeoutException) {
+            Log.i(TAG, "Connection timed out after 30s of silence, assuming client is gone")
         } catch (e: IOException) {
             Log.d(TAG, "Connection ended: ${e.message}")
         } finally {

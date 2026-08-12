@@ -4,18 +4,19 @@ Turns a Samsung SM-G357FZ (Galaxy Ace 4 / Ace Style LTE, Android 4.4.4 / API 19)
 into an AirPlay speaker over its 3.5mm headphone jack. See [docs/decisions.md](docs/decisions.md)
 for the toolchain research and architecture decisions behind this setup.
 
-## Status: Milestone 3 — audio plays
+## Status: Milestone 4 — reconnect handling
 
-Verified end-to-end against a real iPhone on 2026-08-12: select the speaker in
-Control Center, hit play, and audio comes out of the Galaxy Ace 4's headphone
-jack. The full pipeline is live - mDNS discovery, RTSP/RSA/AES handshake,
-per-packet AES-CBC decrypt, ALAC decode, `AudioTrack` playback - all pure
-Kotlin/Java, no native/NDK code anywhere in the app.
+Verified end-to-end against a real iPhone on 2026-08-12, including an actual
+WiFi drop mid-playback: the RTSP connection dies without a clean TEARDOWN
+(caught and cleaned up), the mDNS advertisement pauses, and once WiFi comes
+back it re-advertises against the new IP automatically - no app restart
+needed, no manual replay of the mDNS registration by the user. The speaker
+was selectable and played again immediately after reconnecting.
 
 Not yet implemented: NTP timing sync and retransmit ("resend") request
-handling, so playback can glitch or drift under packet loss or a rough WiFi
-link - fine on a solid local connection, not yet robust. That, plus a
-foreground-service reconnect story, is milestone 4.
+handling, so playback can still glitch or drift under packet loss on an
+otherwise-connected link - that's separate from the reconnect-after-drop
+work done here, and still open for a future pass.
 
 ## Build
 
@@ -48,7 +49,7 @@ Output: `app/build/outputs/apk/debug/app-debug.apk`
 ```
 /app                            # Android app module (Kotlin)
   /src/main/java/com/ace4/airplayreceiver
-    *.kt                        # service, mDNS advertisement, UI
+    *.kt                        # service (incl. WiFi reconnect handling), mDNS advertisement, UI
     /raop                       # RTSP server, RSA/AES crypto, ALAC decoder wrapper
   /src/main/java/com/beatofthedrum/alacdecoder
     *.java                      # vendored pure-Java ALAC decoder (third-party, BSD-style license)
