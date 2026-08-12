@@ -30,6 +30,22 @@ same fixed 1024-bit keypair every RAOP receiver has shared for 15+ years —
 every AirPlay sender encrypts the session key against its matching public
 half, so there's no receiver-side alternative.
 
+**Revised again for milestone 3**: rather than reaching for NDK/JNI for ALAC
+decode as originally planned, found and vendored an existing pure-Java ALAC
+decoder — `soiaf/Java-Apple-Lossless-decoder` (BSD-style license, same
+decode lineage as shairport-sync's own C decoder) — under
+`app/src/main/java/com/beatofthedrum/alacdecoder/`. Only 4 of its ~18 files
+are actually needed (`AlacFile`, `AlacDecodeUtils`, `LeadingZeros`,
+`Defines`); the rest is MP4/QuickTime container demuxing machinery that's
+irrelevant here, since RAOP delivers raw ALAC frames over RTP with the codec
+config coming from the SDP `fmtp` line, not a container. `AlacFile` and
+`AlacDecodeUtils` had their default (package-private) class visibility
+widened to `public` so `com.ace4.airplayreceiver.raop.AlacDecoder` (the
+Kotlin wrapper) can call into them from a different package - the only
+source change made to the vendored files themselves. Tested end-to-end on
+the real Galaxy Ace 4: real-time decode keeps up fine on the Snapdragon 410,
+no native code needed anywhere in the app.
+
 ## mDNS / TXT records: JmDNS, not NsdManager
 Android's built-in `NsdManager`/`NsdServiceInfo.setAttribute()` (needed to set
 DNS-SD TXT records, which `_raop._tcp`/`_airplay._tcp` require for iOS to
@@ -60,12 +76,14 @@ legacy platform behavior active, which is what's actually installed.
   assume minSdk 21+ (e.g. Jetpack Compose). Avoided entirely by not using
   AndroidX/AppCompat — `MainActivity` extends plain `android.app.Activity`
   with `@android:style/Theme.Holo.Light`, which is available since API 11.
-- **NDK: r25c is the one to use when milestone 2 starts.** NDK r25 and earlier
-  support API 19 (KitKat). **r26 dropped KitKat support** (floor raised to
-  API 21) and this carries forward to later releases, including r27, which is
-  what's currently installed locally (`27.0.12077973`) — it will not compile
-  native code against `minSdk 19`. Will need
-  `sdkmanager "ndk;25.2.9519653"` before wiring up the JNI module.
+- **NDK ended up unused entirely** — both the milestone-2 RTSP/crypto
+  handshake and milestone-3 ALAC decode turned out to have pure-JVM options
+  that worked (`javax.crypto`, a vendored pure-Java ALAC decoder). Left here
+  for the record in case that changes later: NDK r25 and earlier support
+  API 19 (KitKat); **r26 dropped KitKat support** (floor raised to API 21),
+  carried forward to later releases including r27, which is what's currently
+  installed locally (`27.0.12077973`) — it will not compile native code
+  against `minSdk 19`. Would need `sdkmanager "ndk;25.2.9519653"` first.
 
 ## Bug: advertising `_airplay._tcp` broke the handshake (found 2026-08-12)
 First milestone-2 test against a real iPhone: the RTSP server never received
@@ -98,6 +116,36 @@ per the original project brief — audio-only legacy AirPlay is the target),
 re-adding `_airplay._tcp` requires implementing the actual HAP pairing
 protocol (Ed25519/Curve25519 SRP, `/pair-setup`, `/pair-verify`) to back it —
 don't advertise the service without the protocol behind it.
+
+## Bug: ALAC decoder crashed on every single frame (found 2026-08-12)
+First milestone-3 test against a real iPhone: handshake and RTP packet flow
+looked fine in the logs, but no sound came out. Full logcat capture showed
+`AlacDecodeUtils.decode_frame()` throwing `ArrayIndexOutOfBoundsException`
+inside `readbits_16()` on every single packet (223 times over one ~10s
+session) — meaning zero frames ever decoded successfully.
+
+Root cause: `readbits_16()` always speculatively reads 3 bytes ahead of the
+current bit position (`ibIdx`, `ibIdx+1`, `ibIdx+2`), even when fewer bits
+are actually needed, then shifts out and discards the unused ones — a
+standard bit-reader performance trick. Near the end of the input buffer this
+overreads past the real frame data. The original C decoder this was ported
+from (and the Java port in its normal file-decoding use) always got buffers
+with slack past the logical frame end, so the overread silently touched
+harmless adjacent memory. Our buffer is exactly RTP-payload-sized with zero
+slack, so the same overread hit Java's array bounds check instead.
+
+Fix: `AlacDecoder.decode()` (`app/src/main/java/com/ace4/airplayreceiver/raop/AlacDecoder.kt`)
+pads the frame buffer with 8 trailing zero bytes before handing it to
+`decode_frame()`. The padding is never part of real decoded output — the
+extra bits the speculative read grabs are always shifted out and discarded —
+so this is a correct fix, not a workaround that risks corrupting audio.
+Retested immediately after: zero exceptions across a full ~36s / ~4500-packet
+session, audio audibly playing through the headphone jack.
+
+**How to apply:** if the vendored decoder is ever updated/re-vendored from
+upstream, keep this padding in place — it's a property of how the bit reader
+works, not something a newer upstream version is likely to have fixed (it's
+correct behavior in the file-decoding context the library was built for).
 
 ## Build environment used for this scaffold
 - JDK: Android Studio's bundled JBR (`Android Studio/jbr`, OpenJDK 21.0.8) —

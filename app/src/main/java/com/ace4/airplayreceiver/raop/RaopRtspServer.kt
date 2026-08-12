@@ -1,5 +1,8 @@
 package com.ace4.airplayreceiver.raop
 
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
 import android.util.Base64
 import android.util.Log
 import java.io.IOException
@@ -7,17 +10,20 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.ServerSocket
 import java.net.Socket
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 private const val TAG = "RaopRtspServer"
 
 /**
- * Milestone 2: accepts the RTSP handshake (OPTIONS/ANNOUNCE/SETUP/RECORD/...)
- * on RaopConstants.RTSP_PORT and derives the per-session AES key/IV, proving
- * an encrypted RAOP session can be established. It does NOT yet decrypt or
- * decode RTP audio packets, or respond to NTP timing/retransmit requests -
- * that's milestone 3, once ALAC decode + AudioTrack playback are wired up.
- * The audio UDP socket set up in SETUP just counts/logs incoming packets for
- * now as proof the client is actually streaming to us.
+ * Accepts the RTSP handshake (OPTIONS/ANNOUNCE/SETUP/RECORD/...) on
+ * RaopConstants.RTSP_PORT, derives the per-session AES key/IV, and - as of
+ * milestone 3 - decrypts, ALAC-decodes, and plays each incoming RTP audio
+ * packet through AudioTrack. Does NOT yet respond to NTP timing sync or
+ * retransmit ("resend") requests, so playback can glitch/drift under packet
+ * loss or on an imperfect WiFi link - that's follow-up work, not needed to
+ * prove basic playback works.
  */
 class RaopRtspServer(private val deviceIdHex: String) {
 
@@ -73,6 +79,8 @@ private class RaopConnectionHandler(
     private var audioSocket: DatagramSocket? = null
     private var controlSocket: DatagramSocket? = null
     private var timingSocket: DatagramSocket? = null
+    private var alacDecoder: AlacDecoder? = null
+    private var audioTrack: AudioTrack? = null
 
     override fun run() {
         Log.i(TAG, "Connection from ${socket.inetAddress.hostAddress}")
@@ -108,7 +116,7 @@ private class RaopConnectionHandler(
                 "ANNOUNCE" -> handleAnnounce(req, cseq)
                 "SETUP" -> handleSetup(req, cseq)
                 "RECORD" -> handleRecord(cseq)
-                "FLUSH" -> RtspProtocol.buildResponse(200, "OK", cseq)
+                "FLUSH" -> handleFlush(cseq)
                 "TEARDOWN" -> RtspProtocol.buildResponse(200, "OK", cseq, mapOf("Connection" to "close"))
                 "GET_PARAMETER" -> RtspProtocol.buildResponse(200, "OK", cseq)
                 "SET_PARAMETER" -> RtspProtocol.buildResponse(200, "OK", cseq)
@@ -166,6 +174,13 @@ private class RaopConnectionHandler(
             }
         }
         fmtp = fmtpLine
+        fmtpLine?.let {
+            try {
+                alacDecoder = AlacDecoder(it)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to parse fmtp \"$it\" - won't be able to decode audio", e)
+            }
+        }
 
         when {
             aesIvB64 != null && rsaAesKeyB64 != null -> {
@@ -205,6 +220,7 @@ private class RaopConnectionHandler(
         audioSocket = audio
         controlSocket = control
         timingSocket = timing
+        audioTrack = createAudioTrack(alacDecoder)
         startAudioReceiver(audio)
 
         Log.i(
@@ -230,6 +246,40 @@ private class RaopConnectionHandler(
         return RtspProtocol.buildResponse(200, "OK", cseq, mapOf("Audio-Latency" to "11025"))
     }
 
+    private fun handleFlush(cseq: String?): ByteArray {
+        try {
+            audioTrack?.flush()
+        } catch (_: Exception) {
+            // no-op if the track isn't in a state that allows flushing
+        }
+        return RtspProtocol.buildResponse(200, "OK", cseq)
+    }
+
+    private fun createAudioTrack(decoder: AlacDecoder?): AudioTrack {
+        val sampleRate = decoder?.sampleRate ?: 44100
+        val channelConfig =
+            if ((decoder?.numChannels ?: 2) >= 2) AudioFormat.CHANNEL_OUT_STEREO
+            else AudioFormat.CHANNEL_OUT_MONO
+        val minBufferSize = AudioTrack.getMinBufferSize(
+            sampleRate, channelConfig, AudioFormat.ENCODING_PCM_16BIT
+        )
+        // Generous headroom over the minimum: we don't yet implement the NTP
+        // timing/resend channels, so a bigger buffer absorbs WiFi jitter
+        // rather than underrunning (audible dropouts) on every small delay.
+        val bufferSize = maxOf(minBufferSize, 4096) * 4
+        @Suppress("DEPRECATION") // AudioTrack.Builder needs API 23+; this app's minSdk is 19
+        val track = AudioTrack(
+            AudioManager.STREAM_MUSIC,
+            sampleRate,
+            channelConfig,
+            AudioFormat.ENCODING_PCM_16BIT,
+            bufferSize,
+            AudioTrack.MODE_STREAM
+        )
+        track.play()
+        return track
+    }
+
     private fun startAudioReceiver(socket: DatagramSocket) {
         val thread = Thread({
             val buf = ByteArray(2048)
@@ -239,7 +289,8 @@ private class RaopConnectionHandler(
                 while (!socket.isClosed) {
                     socket.receive(packet)
                     count++
-                    if (count == 1L || count % 100 == 0L) {
+                    handleAudioPacket(packet.data, packet.length)
+                    if (count == 1L || count % 500 == 0L) {
                         Log.i(TAG, "Audio RTP packet #$count, ${packet.length} bytes from ${packet.address}")
                     }
                 }
@@ -249,6 +300,42 @@ private class RaopConnectionHandler(
         }, "RaopAudioReceiver")
         thread.isDaemon = true
         thread.start()
+    }
+
+    /** RTP header is 12 bytes: version/flags, marker+payload type, seqno(2), timestamp(4), SSRC(4). */
+    private fun handleAudioPacket(data: ByteArray, length: Int) {
+        if (length <= 12) return
+        val payloadType = data[1].toInt() and 0x7F
+        if (payloadType != 0x60) return // only regular audio data (96); resends unhandled for now
+
+        val decoder = alacDecoder ?: return
+        val payload = data.copyOfRange(12, length)
+        val key = aesKey
+        val iv = aesIv
+        val alacFrame = if (key != null && iv != null) decryptAudio(payload, key, iv) else payload
+
+        try {
+            val pcm = decoder.decode(alacFrame)
+            audioTrack?.write(pcm, 0, pcm.size)
+        } catch (e: Exception) {
+            Log.e(TAG, "ALAC decode/playback failed", e)
+        }
+    }
+
+    /**
+     * Classic RAOP encrypts the payload with AES-128-CBC, but only in whole
+     * 16-byte blocks - any trailing partial block is left as plaintext - and
+     * every packet's CBC chain restarts from the same session IV rather than
+     * chaining across packets. Both quirks come straight from shairport-sync's
+     * player.c and must be replicated exactly to match what iOS encrypted.
+     */
+    private fun decryptAudio(payload: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
+        val aesLen = payload.size and 0xF.inv()
+        if (aesLen == 0) return payload
+        val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+        val decrypted = cipher.doFinal(payload, 0, aesLen)
+        return if (aesLen == payload.size) decrypted else decrypted + payload.copyOfRange(aesLen, payload.size)
     }
 
     private fun extractPort(transport: String, key: String): Int? {
@@ -272,5 +359,15 @@ private class RaopConnectionHandler(
         timingSocket = null
         aesKey = null
         aesIv = null
+        alacDecoder = null
+        audioTrack?.let {
+            try {
+                it.stop()
+            } catch (_: Exception) {
+                // already stopped/released
+            }
+            it.release()
+        }
+        audioTrack = null
     }
 }
