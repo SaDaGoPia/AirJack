@@ -3,15 +3,21 @@ package com.ace4.airplayreceiver
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.TextView
+import com.ace4.airplayreceiver.raop.NowPlayingInfo
 
 class MainActivity : Activity() {
 
     private lateinit var editDeviceName: EditText
     private lateinit var textStatus: TextView
     private lateinit var btnToggle: Button
+    private lateinit var imageArtwork: ImageView
+    private lateinit var textTitle: TextView
+    private lateinit var textArtist: TextView
     private var isRunning = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -21,9 +27,13 @@ class MainActivity : Activity() {
         editDeviceName = findViewById(R.id.edit_device_name)
         textStatus = findViewById(R.id.text_status)
         btnToggle = findViewById(R.id.btn_toggle)
+        imageArtwork = findViewById(R.id.image_artwork)
+        textTitle = findViewById(R.id.text_title)
+        textArtist = findViewById(R.id.text_artist)
 
         editDeviceName.setText(DeviceIdentity.getDeviceName(this))
         StatusBus.listener = { status -> onStatusChanged(status) }
+        NowPlayingBus.listener = { info -> onNowPlayingChanged(info) }
 
         btnToggle.setOnClickListener {
             if (isRunning) {
@@ -54,10 +64,27 @@ class MainActivity : Activity() {
                 else -> R.string.status_stopped
             }
         )
+        if (!isRunning) onNowPlayingChanged(NowPlayingInfo())
+    }
+
+    private fun onNowPlayingChanged(info: NowPlayingInfo) {
+        if (info.isEmpty) {
+            textTitle.visibility = View.GONE
+            textArtist.visibility = View.GONE
+            imageArtwork.setImageDrawable(null)
+        } else {
+            textTitle.text = info.title
+            textTitle.visibility = if (info.title.isNullOrBlank()) View.GONE else View.VISIBLE
+            val subtitle = listOfNotNull(info.artist, info.album).joinToString(" — ")
+            textArtist.text = subtitle
+            textArtist.visibility = if (subtitle.isBlank()) View.GONE else View.VISIBLE
+            imageArtwork.setImageBitmap(info.artwork)
+        }
     }
 
     override fun onDestroy() {
         StatusBus.listener = null
+        NowPlayingBus.listener = null
         super.onDestroy()
     }
 }

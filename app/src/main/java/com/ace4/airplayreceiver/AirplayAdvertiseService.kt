@@ -191,10 +191,13 @@ class AirplayAdvertiseService : Service() {
 
     /** Called from the RTSP server's connection-handling thread whenever iOS
      *  pushes new track metadata/artwork; updates the ongoing notification
-     *  in place. NotificationManager is safe to call off the main thread. */
+     *  in place, and forwards the same info to MainActivity's Now Playing
+     *  view via NowPlayingBus if it's open. NotificationManager is safe to
+     *  call off the main thread; NowPlayingBus hops to the main thread itself. */
     private fun updateNotification(info: NowPlayingInfo) {
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIFICATION_ID, buildNotification(info))
+        NowPlayingBus.post(info)
     }
 
     override fun onDestroy() {

@@ -361,6 +361,40 @@ two passes:
    chasing further given the core functionality (correct audio, synced
    indicator, near-1:1 stepping) already works well.
 
+## UI redesign: Musicolet-style Now Playing view
+Scoped with the user to the Now Playing view only (not the whole app), dark
+themed, purely informational (no interactive volume controls, even though the
+device already has working volume sync from the previous section - the user
+was explicit about keeping it read-only). Switched `AndroidManifest.xml`'s
+theme from `@android:style/Theme.Holo.Light` to `@android:style/Theme.Holo`
+and added `values/colors.xml` (`background #0A0A0A`, `surface #1A1A1A`,
+`text_primary #F5F5F5`, `text_secondary #9A9A9A`, `accent #4FC3A1` teal,
+`error #E57373`, unused so far but kept for future error-state styling).
+
+`activity_main.xml` rebuilt around a 200dp artwork square (`artwork_placeholder.xml`,
+a rounded-rect `surface`-colored shape shown when nothing's playing),
+title/artist text (hidden via `visibility="gone"` when empty rather than
+shown blank), the existing status line recolored to the teal accent, and the
+device-name field kept but restyled to fit - `MainActivity.kt` now also
+subscribes to a new `NowPlayingBus` (same in-process `Handler`-based pub-sub
+pattern as the existing `StatusBus`) so the artwork/title/artist update live
+without needing to poll or reopen the app.
+
+**Holo's default EditText underline/cursor is hardcoded platform blue** with
+no Kotlin-accessible attribute to retint it on this pre-AppCompat setup (no
+`colorAccent`, no `android:colorControlActivated` equivalent available to a
+plain `Theme.Holo` app targeting API 19). Rather than fighting Holo's
+internal per-state underline drawable, replaced the EditText's background
+with `@null` and added an explicit 2dp `accent`-colored `View` directly
+beneath it as a manual underline (same technique as the existing section
+divider), plus a small `cursor_accent.xml` shape (solid `accent`, 2dp wide)
+set via `android:textCursorDrawable` so the blinking cursor matches too.
+
+**Verified on real hardware 2026-08-12**: screenshots taken via
+`adb shell screencap` confirm the dark background, teal accent underline/cursor,
+and teal status text all render correctly; toggling Start/Stop shows and hides
+the status text as expected with no layout issues.
+
 ## Build environment used for this scaffold
 - JDK: Android Studio's bundled JBR (`Android Studio/jbr`, OpenJDK 21.0.8) —
   used explicitly via `JAVA_HOME`, since the system `java` on PATH resolves to
