@@ -77,6 +77,7 @@ class AirplayAdvertiseService : Service() {
     }
 
     private fun startAdvertising(name: String) {
+        if (isRunning) return // already running - avoid a second bind on RaopConstants.RTSP_PORT
         deviceName = name
         isRunning = true
         startForeground(NOTIFICATION_ID, buildNotification())
