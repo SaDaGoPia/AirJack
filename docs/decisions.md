@@ -1,15 +1,34 @@
 # Decisions log
 
 ## RAOP implementation approach
-Decision: port shairport-sync via NDK + JNI (not a pure-Kotlin RAOP stack, not
-an existing Android AirPlay-receiver library).
+Original decision (milestone 1 planning): port shairport-sync via NDK + JNI
+(not a pure-Kotlin RAOP stack, not an existing Android AirPlay-receiver
+library).
 
 - Checked `lujnan/shairport-sync` (the one fork claiming "Support For Android"
   on GitHub) — its README has no Android content beyond a stray `Android.mk` /
   `droid_conf.mk`, no JNI layer, no app, no maintenance signal. Not usable as-is.
 - No other actively-maintained Android AirPlay-receiver library was found.
 - shairport-sync (mikebrady/shairport-sync) remains the reference implementation
-  to cross-compile from when milestone 2 starts.
+  to read/port from for protocol details.
+
+**Revised for milestone 2**: the RTSP handshake and RSA/AES key exchange are
+pure Kotlin (`app/src/main/java/com/ace4/airplayreceiver/raop/`), no NDK/JNI.
+This scope (milestone 2 is specifically "RTSP handshake completes, encrypted
+session established," not audio decode) doesn't need C at all — `javax.crypto`
+handles RSA-OAEP/AES-CBC natively, and RTSP is a small text protocol easy to
+parse directly. Cross-compiling shairport-sync's autotools build just for this
+would have meant fighting a WSL + NDK toolchain for logic that's actually
+simpler in Kotlin. Native code is still expected for milestone 3's ALAC
+decoder specifically (a small, self-contained piece, not the whole
+shairport-sync daemon) — that's the part that actually benefits from C.
+
+The well-known RAOP RSA private key (`RaopCrypto.kt`) was copied verbatim from
+shairport-sync's `common.c` (`super_secret_key`) rather than reconstructed
+from memory, since a single wrong bit silently breaks all crypto. It's the
+same fixed 1024-bit keypair every RAOP receiver has shared for 15+ years —
+every AirPlay sender encrypts the session key against its matching public
+half, so there's no receiver-side alternative.
 
 ## mDNS / TXT records: JmDNS, not NsdManager
 Android's built-in `NsdManager`/`NsdServiceInfo.setAttribute()` (needed to set
@@ -47,6 +66,38 @@ legacy platform behavior active, which is what's actually installed.
   what's currently installed locally (`27.0.12077973`) — it will not compile
   native code against `minSdk 19`. Will need
   `sdkmanager "ndk;25.2.9519653"` before wiring up the JNI module.
+
+## Bug: advertising `_airplay._tcp` broke the handshake (found 2026-08-12)
+First milestone-2 test against a real iPhone: the RTSP server never received
+an ANNOUNCE. Logs showed the iPhone repeatedly calling `GET /info`,
+`POST /pair-setup`, `POST /pair-verify` (HomeKit-style AirPlay 2 pairing
+endpoints), then retrying `OPTIONS` in a loop, forever, across many
+reconnects — it never once attempted the classic RTSP flow.
+
+Root cause: `RaopAdvertiser` was registering a second mDNS service,
+`_airplay._tcp`, alongside `_raop._tcp` (with `features`/`deviceid`/`flags`
+TXT keys). Checked shairport-sync's `bonjour_strings.c`/`rtsp.c`: it only
+builds and registers that second service (`secondary_txt_records`, `t2`) when
+compiled with `CONFIG_AIRPLAY_2` *and* `config.service_type == APST_airplay2`.
+A classic/legacy-only build never registers `_airplay._tcp` at all — only
+`_raop._tcp`. Advertising `_airplay._tcp` from a receiver that doesn't
+implement AirPlay 2 pairing told iOS this speaker supports HomeKit-style
+pairing, and iOS got stuck trying to complete that pairing instead of falling
+back to classic RAOP.
+
+Fix: removed the `_airplay._tcp` registration entirely; `RaopAdvertiser` now
+advertises only `_raop._tcp`, with TXT keys matching shairport-sync's classic
+(`else` branch, non-AirPlay2) defaults exactly (`txtvers`, `ch`, `cn`, `ek`,
+`et`, `md`, `pw`, `sr`, `ss`, `sv`, `da`, `tp=TCP,UDP`, `vn`, `vs`, `fv`, `am`,
+`sf`). Retested immediately after: full OPTIONS → ANNOUNCE → SETUP → RECORD
+handshake completed, AES key derived, ~4100 RTP packets received over one
+real playback session.
+
+**How to apply:** if AirPlay 2 support is ever considered later (out of scope
+per the original project brief — audio-only legacy AirPlay is the target),
+re-adding `_airplay._tcp` requires implementing the actual HAP pairing
+protocol (Ed25519/Curve25519 SRP, `/pair-setup`, `/pair-verify`) to back it —
+don't advertise the service without the protocol behind it.
 
 ## Build environment used for this scaffold
 - JDK: Android Studio's bundled JBR (`Android Studio/jbr`, OpenJDK 21.0.8) —

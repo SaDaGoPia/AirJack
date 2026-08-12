@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.util.Log
+import com.ace4.airplayreceiver.raop.RaopRtspServer
 
 class AirplayAdvertiseService : Service() {
 
@@ -24,6 +25,7 @@ class AirplayAdvertiseService : Service() {
     }
 
     private lateinit var advertiser: RaopAdvertiser
+    private var rtspServer: RaopRtspServer? = null
     private var workerThread: HandlerThread? = null
     private var workerHandler: Handler? = null
 
@@ -55,6 +57,13 @@ class AirplayAdvertiseService : Service() {
         workerHandler?.post {
             try {
                 val deviceId = DeviceIdentity.getOrCreateDeviceId(this)
+
+                // Start the RTSP listener before advertising over mDNS, so the
+                // port is already accepting connections by the time iOS can see us.
+                val server = RaopRtspServer(deviceId)
+                server.start()
+                rtspServer = server
+
                 advertiser.start(deviceName, deviceId)
                 StatusBus.post(STATUS_ADVERTISING)
             } catch (e: Exception) {
@@ -67,6 +76,8 @@ class AirplayAdvertiseService : Service() {
     private fun stopAdvertising() {
         workerHandler?.post {
             advertiser.stop()
+            rtspServer?.stop()
+            rtspServer = null
             StatusBus.post(STATUS_STOPPED)
         }
     }
@@ -81,6 +92,8 @@ class AirplayAdvertiseService : Service() {
 
     override fun onDestroy() {
         advertiser.stop()
+        rtspServer?.stop()
+        rtspServer = null
         workerThread?.quitSafely()
         StatusBus.post(STATUS_STOPPED)
         super.onDestroy()

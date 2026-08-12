@@ -4,11 +4,20 @@ Turns a Samsung SM-G357FZ (Galaxy Ace 4 / Ace Style LTE, Android 4.4.4 / API 19)
 into an AirPlay speaker over its 3.5mm headphone jack. See [docs/decisions.md](docs/decisions.md)
 for the toolchain research and architecture decisions behind this setup.
 
-## Status: Milestone 1 — mDNS advertisement
+## Status: Milestone 2 — RTSP handshake / encrypted session
 
-The app advertises `_raop._tcp` and `_airplay._tcp` services via mDNS so the
-device shows up in iOS's AirPlay picker. **No RTSP/RTP server exists yet** —
-selecting the speaker on the iPhone will not yet play audio. That's milestone 2.
+Verified end-to-end against a real iPhone on 2026-08-12: the device advertises
+`_raop._tcp` via mDNS, the iPhone selects it, and the app completes the full
+legacy RAOP handshake (OPTIONS → ANNOUNCE → SETUP → RECORD), derives the AES
+session key from the RSA-OAEP-wrapped key in the ANNOUNCE SDP, and receives a
+continuous stream of encrypted RTP audio packets for the duration of playback.
+
+**No audio plays yet** — RTP packets are received and counted, not decrypted
+or decoded. That's milestone 3 (ALAC decode + `AudioTrack` playback).
+
+Implementation is pure Kotlin (`app/src/main/java/com/ace4/airplayreceiver/raop/`)
+— no native/NDK code. See decisions doc for why that's a deliberate change from
+the original "port shairport-sync via JNI" plan for milestone 1.
 
 ## Build
 
@@ -29,16 +38,20 @@ Output: `app/build/outputs/apk/debug/app-debug.apk`
    `adb install app/build/outputs/apk/debug/app-debug.apk`
 3. Connect the phone to the same WiFi network as your iPhone.
 4. Open the app, optionally rename the speaker, tap Start.
-5. On the iPhone, open Control Center → AirPlay — the device name should
-   appear in the list (it won't play audio successfully yet).
+5. On the iPhone, open Control Center → AirPlay, select the speaker, and
+   start playing audio. No sound will come out yet (milestone 3), but you can
+   confirm the handshake is working via `adb logcat -s RaopRtspServer` — look
+   for "ANNOUNCE: encrypted session established" followed by a stream of
+   "Audio RTP packet #N" lines.
 
 ## Project layout
 
 ```
-/app                # Android app module (Kotlin)
-  /src/main/java     # service, mDNS advertisement, AudioTrack playback (later), UI
-/native              # cross-compiled shairport-sync subset (added in milestone 2)
-/docs                # protocol notes, decisions, test logs
+/app                            # Android app module (Kotlin)
+  /src/main/java/com/ace4/airplayreceiver
+    *.kt                        # service, mDNS advertisement, UI
+    /raop                       # RTSP server, RSA/AES crypto, wire protocol parsing
+/docs                            # protocol notes, decisions, test logs
 ```
 
 ## Toolchain pins
@@ -46,6 +59,9 @@ Output: `app/build/outputs/apk/debug/app-debug.apk`
 - AGP 8.7.3, Gradle 8.13, Kotlin 2.0.21
 - `compileSdk 34`, `minSdk 19`, `targetSdk 19` (targetSdk intentionally pinned to
   match the real device — see decisions doc for why)
-- NDK: not wired in yet. When milestone 2 (shairport-sync JNI port) starts, pin
-  **NDK r25c** — r26+ dropped API 19 support. r27 (currently installed locally)
-  will not compile native code against `minSdk 19`.
+- NDK: not wired in. Milestone 2's RTSP/crypto work turned out not to need it
+  (see decisions doc) — pure Kotlin + `javax.crypto` handles RSA/AES fine.
+  Native code is now expected to resurface in milestone 3 for ALAC decoding
+  specifically; when that starts, pin **NDK r25c** — r26+ dropped API 19
+  support, and r27 (currently installed locally) will not compile native code
+  against `minSdk 19`.
