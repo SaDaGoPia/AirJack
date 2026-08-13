@@ -1,5 +1,7 @@
 # AirPlay Audio Receiver for Galaxy Ace 4
 
+![AirJack](docs/images/social-preview.png)
+
 Turns a Samsung SM-G357FZ (Galaxy Ace 4 / Ace Style LTE, Android 4.4.4 / API 19)
 into an AirPlay speaker over its 3.5mm headphone jack. See [docs/decisions.md](docs/decisions.md)
 for the toolchain research and architecture decisions behind this setup.
@@ -17,7 +19,10 @@ system button, and the app/notification icons are a small generated glyph
 reused throughout, including as the idle artwork placeholder. Reopening the
 app while the service is still running now shows the correct state
 immediately, the keyboard no longer opens automatically on launch, and the
-speaker-name field locks (with an explanatory label) while advertising.
+speaker-name field locks (with an explanatory label) while advertising. The
+notification itself is now styled like a music player's - tinted with a
+color pulled straight from the current track's artwork, with a bigger, wider
+artwork banner in its expanded view.
 
 Not working, and not expected to start working without a change on Apple's
 side: pushing the Ace4's volume-button presses back to the iPhone (DACP
@@ -71,6 +76,7 @@ Output: `app/build/outputs/apk/debug/app-debug.apk`
   /src/main/java/com/beatofthedrum/alacdecoder
     *.java                      # vendored pure-Java ALAC decoder (third-party, BSD-style license)
 /docs                            # protocol notes, decisions, test logs
+  /images/social-preview.png     # repo social-preview / link-thumbnail image (Settings -> Social preview)
 ```
 
 ## Toolchain pins

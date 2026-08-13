@@ -7,4 +7,6 @@
     <color name="accent">#4FC3A1</color>
     <color name="warning">#D98C2B</color>
     <color name="error">#E57373</color>
+    <color name="notification_text_primary">#FFFFFFFF</color>
+    <color name="notification_text_secondary">#D9FFFFFF</color>
 </resources>

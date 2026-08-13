@@ -523,6 +523,72 @@ each step; keyboard confirmed not opening on a fresh launch; the reopen-state
 fix confirmed via the Back-then-relaunch test described above; title bar
 confirmed removed with layout unaffected.
 
+## Music-player-style notification: color extracted from artwork, no Palette library
+Follow-up request: make the ongoing notification look like a real music
+player's (Spotify/YT Music-style) - tinted with the artwork's dominant
+color, with a bigger, wider artwork image than the old small square.
+
+**No AndroidX Palette library, and `Notification.Builder.setColor()` doesn't
+exist on the real target device at all.** This project avoids AndroidX
+entirely, and `setColor()` (the platform's own notification-accent-color
+API) was only added in API 21 - calling it on the real API 19 Galaxy Ace 4
+would throw `NoSuchMethodError` at runtime regardless of any
+`Build.VERSION.SDK_INT` guard, since the guard would always evaluate to "not
+supported" on this one fixed piece of hardware anyway. Both dead ends ruled
+out any dependency on Android's own post-Lollipop notification theming.
+
+**Dominant-color extraction (`ArtworkColor.kt`)**: implemented a small
+from-scratch approximation of Palette's "Vibrant" swatch rather than porting
+in the library: downsamples the artwork to 32x32, buckets pixels into coarse
+RGB groups (rounded to the nearest 32 per channel), discards buckets that
+are too dark/light/desaturated (typically cover-art padding or a mostly-white
+background rather than the actual artwork), and picks the most frequent
+remaining bucket. The winning color's saturation/value get clamped
+(`hsv[1] >= 0.45`, `hsv[2]` in `0.28..0.55`) so the result reads as a
+genuine color and stays dark enough for white notification text to stay
+legible regardless of how bright the source art is.
+
+**Custom `RemoteViews` layout instead of `BigPictureStyle`**, because
+`BigPictureStyle` builds its own content view internally and doesn't expose
+a way to also tint the background - combining "colored background" with
+"bigger artwork" needed a fully custom layout either way. Two new layout
+resources: `notification_small.xml` (the 64dp collapsed row - thumbnail +
+title/artist) and `notification_big.xml` (a match-parent-width, 160dp-tall
+`centerCrop` artwork banner across the top, matching how Spotify/YT Music
+crop a square cover into a wide banner in the expanded card, with
+title/artist below). Wired via `Notification.Builder.setContent()` for the
+collapsed view (public since API 1) and direct assignment to the public
+`Notification.bigContentView` field for the expanded view (public since
+API 16, predating the `setCustomBigContentView()` builder method that
+superseded it in API 24) - both deprecated in favor of newer APIs that don't
+exist on API 19, so both are used deliberately here, consistent with this
+project's established pattern of using older-but-real platform APIs over
+polyfills that only work above the actual target OS version.
+`RemoteViews.setInt(viewId, "setBackgroundColor", color)` tints each
+layout's root at runtime - this reflective single-int-arg form of `setInt`
+predates the Android 12 method allowlist restriction, so it's unrestricted
+on API 19.
+
+Only takes over once real metadata *and* artwork exist
+(`info.isEmpty || artwork == null` still falls back to the original plain
+`Notification.Builder` with just a title/text, matching the "just started,
+nothing playing yet" state) - no point building a colored custom layout with
+no color to extract.
+
+**Verified on real hardware 2026-08-13**: temporarily flipped
+`AirplayAdvertiseService`'s manifest `exported` flag to `true` and added a
+throwaway `ACTION_DEBUG_PREVIEW` intent branch that fed the notification a
+synthetic two-color test bitmap, purely to trigger the artwork-tinted code
+path without needing a live iPhone streaming through the RTSP metadata pipe
+- both were fully reverted after confirming the result, matching this
+project's practice of never leaving debug scaffolding behind. Screenshots
+confirmed: the collapsed notification correctly tinted with one of the test
+image's two colors with the thumbnail and text readable; pulling the
+notification open further showed the full-width 160dp artwork banner
+correctly cropped and tinted to match; the original plain fallback
+notification (no metadata yet) still renders correctly, unaffected by the
+new branch.
+
 ## Build environment used for this scaffold
 - JDK: Android Studio's bundled JBR (`Android Studio/jbr`, OpenJDK 21.0.8) —
   used explicitly via `JAVA_HOME`, since the system `java` on PATH resolves to

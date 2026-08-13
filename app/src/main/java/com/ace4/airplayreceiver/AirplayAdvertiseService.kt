@@ -13,6 +13,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.util.Log
+import android.widget.RemoteViews
 import com.ace4.airplayreceiver.raop.NowPlayingInfo
 import com.ace4.airplayreceiver.raop.RaopRtspServer
 
@@ -174,19 +175,49 @@ class AirplayAdvertiseService : Service() {
     }
 
     private fun buildNotification(info: NowPlayingInfo = NowPlayingInfo()): Notification {
-        val builder = Notification.Builder(this)
+        val artwork = info.artwork
+        if (info.isEmpty || artwork == null) {
+            return Notification.Builder(this)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setOngoing(true)
+                .setContentTitle(getString(R.string.app_name))
+                .setContentText(getString(R.string.status_advertising))
+                .build()
+        }
+
+        // Music-player-style notification: a custom RemoteViews layout tinted
+        // with a color pulled from the artwork itself, since this project
+        // targets real API 19 hardware with no AndroidX (no Palette library,
+        // and Notification.Builder.setColor() doesn't exist in that
+        // framework at all - it was added in API 21).
+        @Suppress("DEPRECATION")
+        val fallbackColor = resources.getColor(R.color.accent)
+        val accentColor = ArtworkColor.extractAccent(artwork, fallbackColor)
+        val title = info.title ?: getString(R.string.app_name)
+        val subtitle = listOfNotNull(info.artist, info.album).joinToString(" — ")
+
+        val smallViews = RemoteViews(packageName, R.layout.notification_small).apply {
+            setInt(R.id.notification_root, "setBackgroundColor", accentColor)
+            setImageViewBitmap(R.id.notification_artwork, artwork)
+            setTextViewText(R.id.notification_title, title)
+            setTextViewText(R.id.notification_artist, subtitle)
+        }
+        val bigViews = RemoteViews(packageName, R.layout.notification_big).apply {
+            setInt(R.id.notification_big_root, "setBackgroundColor", accentColor)
+            setImageViewBitmap(R.id.notification_big_artwork, artwork)
+            setTextViewText(R.id.notification_big_title, title)
+            setTextViewText(R.id.notification_big_artist, subtitle)
+        }
+
+        val notification = Notification.Builder(this)
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
-        if (info.isEmpty) {
-            builder.setContentTitle(getString(R.string.app_name))
-            builder.setContentText(getString(R.string.status_advertising))
-        } else {
-            builder.setContentTitle(info.title ?: getString(R.string.app_name))
-            val subtitle = listOfNotNull(info.artist, info.album).joinToString(" — ")
-            builder.setContentText(subtitle.ifBlank { getString(R.string.status_advertising) })
-            info.artwork?.let { builder.setLargeIcon(it) }
-        }
-        return builder.build()
+            .setContentTitle(title)
+            .setContentText(subtitle.ifBlank { getString(R.string.status_advertising) })
+            .setContent(smallViews)
+            .build()
+        notification.bigContentView = bigViews
+        return notification
     }
 
     /** Called from the RTSP server's connection-handling thread whenever iOS
