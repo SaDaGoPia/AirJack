@@ -9,5 +9,6 @@
     <string name="btn_start">Start</string>
     <string name="btn_stop">Stop</string>
     <string name="label_device_name">Speaker name</string>
+    <string name="label_device_name_locked">Speaker name — stop to rename</string>
     <string name="default_device_name">Galaxy Ace 4</string>
 </resources>

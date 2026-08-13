@@ -434,6 +434,95 @@ service shows the same glyph as a correctly-rendered white silhouette in both
 the status bar and the pulled-down notification shade, with no resource
 errors in logcat.
 
+## Reopen-state bug, keyboard auto-open, name-lock, and the status dial redesign
+Follow-up session: a UI review of the Now Playing screen plus three concrete
+behavior fixes the user had run into.
+
+**Bug: reopening the app while the service was still running showed the
+wrong state.** `StatusBus` was pure fire-and-forget pub-sub with no memory of
+the last-posted status - `MainActivity.onCreate()` only registered a listener
+for *future* status changes, so if `AirplayAdvertiseService` was already
+running in the background (the process stays alive under a foreground
+service even after the user backs out of `MainActivity`), reopening the app
+showed "Stopped" and a "Start" button/dial regardless of the real state,
+until the next incidental status event happened to fire. Fixed by having
+`StatusBus` cache `currentStatus`, and having `MainActivity.onCreate()` call
+`onStatusChanged(StatusBus.currentStatus)` immediately after registering the
+listener - since both objects live in the same process, this correctly
+reflects an already-running service. **Verified on real hardware 2026-08-13**
+by advertising, pressing Back (confirmed via `dumpsys activity activities`
+that `MainActivity` was actually destroyed, not just backgrounded, while
+`dumpsys activity services` confirmed the service/process survived), then
+relaunching - the dial and caption immediately showed the correct
+"advertising" state on the fresh `onCreate`, no stale "Stopped" flash.
+
+**Bug: soft keyboard opened automatically on launch.** No
+`windowSoftInputMode` was set, and the device-name `EditText` was the only
+focusable view in the layout, so it silently grabbed default focus. Fixed
+with `android:windowSoftInputMode="stateAlwaysHidden"` on the activity, plus
+`android:focusable="true" android:focusableInTouchMode="true"` on the root
+`LinearLayout` so the `EditText` doesn't receive default focus at all (belt
+and suspenders - the manifest flag alone controls IME visibility, not which
+view holds focus).
+
+**Feature: lock the device-name field while advertising.** Renaming the
+speaker mid-session while a device might already be connected to it under
+the old name is confusing, not useful. `editDeviceName.isEnabled` now
+tracks `!isRunning` (dimmed to 50% alpha too), and the field's label swaps
+to "Speaker name — stop to rename" while locked, rather than just silently
+ignoring taps with no explanation - this addressed a specific gap the UI
+review below also flagged (Heuristic 6, Recognition Rather Than Recall).
+
+**UI review and redesign.** Ran a Nielsen-heuristics-based critique of the
+Now Playing screen (framework only - the automated web-markup detector and
+browser-injection tooling this project's design-review skill normally uses
+don't apply to a native Android XML/Kotlin screen with no renderable
+browser surface, so that part was done manually rather than pretending it
+ran). Scored 25/40 ("Acceptable"). Findings, most to least severe: the
+Start/Stop control was a bare, unstyled system `Button` clashing with an
+otherwise fully custom dark+teal screen (Consistency, Aesthetic); Error and
+Reconnecting states rendered in the same calm teal as normal operation, no
+color severity (Visibility of System Status, Error Recovery); the locked
+name field (see above) had no explanation; the empty artwork square was a
+flat blank rectangle indistinguishable from "broken/still loading."
+
+Presented the review plus two direction questions via `AskUserQuestion`
+(consistent with this project's established preference for surfacing real
+forks rather than picking one silently): scope of the redesign
+(craft-fixes-only vs. a bigger structural change vs. a new color identity),
+and whether the empty artwork state should show the app's own glyph. User
+chose the structural option plus the glyph.
+
+Implementation: replaced the small status caption + plain `Button` with a
+single large (168dp) circular "status dial" - one tap target whose fill
+color *is* the state signal (`dial_stopped.xml` outlined `surface`/
+`text_secondary`, `dial_starting.xml`/`dial_advertising.xml` solid
+`accent` teal, `dial_reconnecting.xml` a new `warning` amber
+(`#D98C2B`, chosen dark enough to keep white label text legible - a pale
+amber would have failed contrast), `dial_error.xml` solid `error` red),
+reusing the same white `ic_notification` glyph asset already generated for
+the notification icon (no new asset needed - a white silhouette works over
+any of the four fill colors). A short `ObjectAnimator` alpha pulse
+(700ms, `REVERSE`/`INFINITE`) runs only during Starting/Reconnecting, so
+"something's in progress" is visible without needing to read text. Decided
+the caption text below the dial stays a neutral `text_secondary` gray in
+every state rather than *also* color-coding it - the dial alone carries the
+severity signal now, so duplicating it in the caption would be redundant
+color use rather than reinforcement. The empty-state artwork square gained a
+second, overlaid `ImageView` showing the same glyph at 0.35 alpha, hidden
+once real album art arrives.
+
+Mid-verification the user asked to drop the title bar entirely (app
+icon + "AirPlay Receiver" ActionBar) - changed the manifest theme from
+`Theme.Holo` to `Theme.Holo.NoActionBar`, a one-line change since this
+project already avoids AppCompat/Toolbar.
+
+**Verified on real hardware 2026-08-13**: full Stopped → Starting →
+Advertising → Stopped cycle screenshotted with correct dial colors/labels at
+each step; keyboard confirmed not opening on a fresh launch; the reopen-state
+fix confirmed via the Back-then-relaunch test described above; title bar
+confirmed removed with layout unaffected.
+
 ## Build environment used for this scaffold
 - JDK: Android Studio's bundled JBR (`Android Studio/jbr`, OpenJDK 21.0.8) —
   used explicitly via `JAVA_HOME`, since the system `java` on PATH resolves to

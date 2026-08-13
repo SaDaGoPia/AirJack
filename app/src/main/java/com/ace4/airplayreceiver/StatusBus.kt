@@ -9,11 +9,14 @@ import android.os.Looper
  * the broadcast/receiver machinery and the androidx LocalBroadcastManager dependency.
  */
 object StatusBus {
+    var currentStatus: Int = AirplayAdvertiseService.STATUS_STOPPED
+        private set
     var listener: ((Int) -> Unit)? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
     fun post(status: Int) {
+        currentStatus = status
         mainHandler.post { listener?.invoke(status) }
     }
 }

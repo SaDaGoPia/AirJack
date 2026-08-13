@@ -10,15 +10,31 @@
         android:layout_height="wrap_content"
         android:orientation="vertical"
         android:gravity="center_horizontal"
-        android:padding="24dp">
+        android:padding="24dp"
+        android:focusable="true"
+        android:focusableInTouchMode="true">
 
-        <ImageView
-            android:id="@+id/image_artwork"
+        <FrameLayout
             android:layout_width="200dp"
             android:layout_height="200dp"
             android:layout_marginTop="16dp"
-            android:background="@drawable/artwork_placeholder"
-            android:scaleType="centerCrop" />
+            android:background="@drawable/artwork_placeholder">
+
+            <ImageView
+                android:id="@+id/image_artwork"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scaleType="centerCrop" />
+
+            <ImageView
+                android:id="@+id/image_artwork_glyph"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:layout_gravity="center"
+                android:alpha="0.35"
+                android:src="@drawable/ic_notification" />
+
+        </FrameLayout>
 
         <TextView
             android:id="@+id/text_title"
@@ -45,14 +61,50 @@
             android:ellipsize="end"
             android:visibility="gone" />
 
+        <FrameLayout
+            android:id="@+id/status_dial"
+            android:layout_width="168dp"
+            android:layout_height="168dp"
+            android:layout_marginTop="28dp"
+            android:background="@drawable/dial_stopped"
+            android:clickable="true"
+            android:focusable="true">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:orientation="vertical"
+                android:gravity="center_horizontal">
+
+                <ImageView
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:alpha="0.55"
+                    android:src="@drawable/ic_notification" />
+
+                <TextView
+                    android:id="@+id/dial_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/btn_start"
+                    android:textAllCaps="true"
+                    android:textColor="@color/text_primary"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
+
+            </LinearLayout>
+        </FrameLayout>
+
         <TextView
             android:id="@+id/text_status"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
+            android:layout_marginTop="16dp"
             android:gravity="center"
             android:text="@string/status_stopped"
-            android:textColor="@color/accent"
+            android:textColor="@color/text_secondary"
             android:textSize="13sp" />
 
         <View
@@ -87,13 +139,6 @@
             android:layout_height="2dp"
             android:layout_marginTop="4dp"
             android:background="@color/accent" />
-
-        <Button
-            android:id="@+id/btn_toggle"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:text="@string/btn_start" />
 
     </LinearLayout>
 </ScrollView>
