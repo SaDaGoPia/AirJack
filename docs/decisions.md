@@ -589,6 +589,127 @@ correctly cropped and tinted to match; the original plain fallback
 notification (no metadata yet) still renders correctly, unaffected by the
 new branch.
 
+## Stutter diagnosis over iPhone Personal Hotspot, and a real cold-start bug
+User reported recurring playback stutter specifically "when I go out" - using
+the Ace4 with an iPhone's Personal Hotspot as the connection instead of a
+shared home WiFi network. First checked whether the hotspot topology itself
+was the problem: `RaopAdvertiser`'s mDNS binding just asks `WifiManager` for
+whatever IP the Ace4 currently has, with no assumption about what's on the
+other end, so a hotspot connection looks identical to any other WiFi AP from
+the Ace4's side. Verified live against a real hotspot connection
+("Samppa's iPhone", strong RSSI) - mDNS advertised fine, handshake completed,
+audio streamed. Packet loss (resend-recovered, ~1.2% of packets) was normal
+and not worsening over time, so the hotspot connection itself wasn't the
+issue.
+
+**Real root cause, found via `adb logcat` during a live "I hear stuttering"
+session**: `AudioFlinger: BUFFER TIMEOUT` / `AudioTrack: ... disabled due to
+previous underrun, restarting` fired exactly 390ms after `RECORD: session
+established` in every single case checked (2 for 2, millisecond-identical
+delta) - a deterministic local bug, unrelated to WiFi. `createAudioTrack()`
+(`RaopRtspServer.kt`) called `track.play()` immediately after construction,
+before a single byte of real audio had been written. This device's low-power
+"deep-buffer-playback" audio HAL path (visible in the audio_hw_primary logs)
+needs a healthy amount of pre-buffered data to sustain smooth output: telling
+it to start consuming from an empty buffer means it runs dry while
+decode/network are still catching up. The "recurrent" feel came from the
+iPhone renegotiating a **fresh RTSP session on every track change** (a new
+`Connection from` -> `ANNOUNCE` -> `SETUP` -> `RECORD`, not just on first
+connect) - a new AudioTrack gets created and cold-started every song, so the
+bug fired once per track.
+
+Fix: `track.play()` is no longer called at creation. `primePlayback()` is
+called after every decoded write and only calls `.play()` once half a
+buffer's worth of real audio has actually been queued
+(`primeThresholdBytes = bufferSize / 2`), so the HAL never starts short.
+`handleFlush()` (RAOP's routine post-RECORD buffer-clear, which happens
+*before* the track starts playing, when `AudioTrack.flush()` actually has an
+effect) resets the byte counter too, since it would otherwise wipe data that
+was already counted toward the threshold. **Caught and fixed a units bug of
+my own while wiring the volume booster (below) into the same code path**:
+`AlacDecoder.decode()` returns a `ShortArray` (samples), not a `ByteArray`,
+so the original `primePlayback(pcm.size)` was counting *samples* against a
+*byte* threshold - accumulating at half the intended rate. Fixed to
+`primePlayback(pcm.size * 2)`.
+
+**Verified on real hardware 2026-08-14**: zero `BUFFER TIMEOUT`/underrun
+events across multiple full sessions and track changes after the fix,
+including the exact transition that reproduced it 100% of the time before.
+
+## Additional stutter-resistance hardening
+Implemented alongside the cold-start fix, none individually confirmed as a
+root cause but each a plausible, low-risk contributor on a mobile connection
+specifically (vs. the stationary home WiFi the app was mostly verified on
+before):
+- **WiFi high-performance lock** (`RaopAdvertiser.kt`): Android's own WiFi
+  power-saving can nap the Ace4's radio between packets independent of
+  whatever the AP is doing - `WIFI_MODE_FULL_HIGH_PERF` held for the same
+  lifetime as the existing multicast lock rules this out.
+- **Urgent-audio thread priority** (`startAudioReceiver()`): reduces the odds
+  of another app's background work preempting the receive/decode/write path
+  long enough to starve AudioTrack on this 1GB RAM device - a CPU-side
+  stutter cause independent of the network.
+- **Bounded resend retry** (`RaopRtspServer.kt`): previously each lost packet
+  got exactly one resend request with no fallback if that request or its
+  reply was also dropped - plausible on a lossier mobile link. `pendingResends`
+  (seqno -> requested-at) plus a 200ms staleness check on every incoming
+  packet now retries once before giving up for good.
+
+**Still outstanding, not fixed this pass**: live testing after the above
+still showed audible stutter with zero underruns logged, alongside 122
+resend events in one session. The suspected remaining cause is the
+architecture gap flagged since this project's original design pass (see the
+RTP resend/retransmit section above) - there's still no jitter/reorder
+buffer, so a resent packet is decoded and played the instant it arrives, out
+of order if it's late, rather than being reinserted at the correct position.
+With well over a hundred resends in a normal session, that's a real,
+evidenced mechanism for an audible micro-glitch that's completely
+independent of the cold-start bug fixed above. Revisiting that original
+"minor, rare artifact" tradeoff with a real playout buffer is the likely next
+step, pending confirmation from the user on how the remaining stutter
+actually sounds (gap vs. blip) to make sure it's the same mechanism before
+building it.
+
+## Volume: fixed a real double-attenuation bug, added a digital boost
+User reported the app "sounds low." Investigation found a genuine bug, not
+just a perception issue: `handleSetParameterText()` was applying iOS's
+volume in *two* places at once - `AudioTrack.setStereoVolume()` (the real,
+precise, exponential dB-to-linear gain) *and* mirroring the same value into
+`AudioManager.setStreamVolume()` (originally added much earlier purely so
+the on-screen "media volume" indicator visually tracked iOS's position - see
+the volume sync section above). AudioFlinger applies track volume and stream
+volume multiplicatively, so running both at once compounded: at anything
+below iOS's max volume, real output was quieter than either value alone
+implied.
+
+Fixed by removing `setStreamVolume()` from the per-change handler entirely
+and pinning `STREAM_MUSIC` to max once, in `createAudioTrack()`, at session
+start - `AudioTrack.setStereoVolume()` is now the sole real attenuation
+control again, exactly as it was before the stream-index mirroring was added.
+Traded away the on-screen slider's cosmetic sync with iOS's position (it now
+just sits at max) in favor of the audio actually being as loud as intended;
+judged the right call given the user's immediate complaint was loudness, not
+the indicator.
+
+**Volume booster**: added genuine headroom beyond iOS's own max volume,
+since `AudioTrack.setStereoVolume()` is platform-clamped to 1.0 - a value
+above that is silently clamped away, so boosting had to happen as real
+digital gain on the decoded PCM samples themselves (`applyBoost()`,
++3dB / 1.41x, in `handleAudioPacket()` right after decode), not through the
+track-level API at all. Deliberately conservative and a plain multiply +
+hard clamp rather than a soft-knee limiter: the tracks tested with earlier
+in this session (hip-hop/reggaeton) are already hot-mastered with little
+headroom before clipping, and a real soft limiter needs a per-sample
+transcendental function - real CPU cost on a Snapdragon 410 this same pass
+just finished protecting from CPU contention (see above). At a conservative
+gain, hard-clamping should be rare enough in practice not to be worth that
+cost.
+
+**Verified on real hardware 2026-08-14**: confirmed via log
+(`SET_PARAMETER: volume 0.0 dB -> gain 1.0`) that only one gain stage is
+active at max iOS volume; no crashes from the boost path across a full
+session.
+
 ## Build environment used for this scaffold
 - JDK: Android Studio's bundled JBR (`Android Studio/jbr`, OpenJDK 21.0.8) —
   used explicitly via `JAVA_HOME`, since the system `java` on PATH resolves to

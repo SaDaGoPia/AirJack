@@ -103,10 +103,19 @@ private class RaopConnectionHandler(
     private var clientControlPort: Int = 0
     private var expectedSeqno: Int = -1 // -1 = not yet initialized (no packet seen yet)
     private var nowPlaying = NowPlayingInfo()
+    private var playbackStarted = false
+    private var primeThresholdBytes = 0
+    private var bytesWrittenSincePrime = 0
+    private val pendingResends = LinkedHashMap<Int, Long>() // seqno -> requested-at (ms), awaiting arrival or retry
+    private val retriedResends = HashSet<Int>() // seqnos already retried once - don't chase forever
 
     companion object {
         /** Bigger gaps than this are treated as a stream restart/reorder, not loss - don't chase them. */
         private const val MAX_RESEND_GAP = 32
+        /** How long to wait for a resend before assuming the request or its reply was also lost. */
+        private const val RESEND_RETRY_MS = 200L
+        /** Extra linear gain applied to decoded PCM, on top of iOS's own volume - see applyBoost(). ~+3dB. */
+        private const val BOOST_GAIN = 1.41f
     }
 
     override fun run() {
@@ -286,6 +295,11 @@ private class RaopConnectionHandler(
     private fun handleFlush(cseq: String?): ByteArray {
         try {
             audioTrack?.flush()
+            // flush() discards any buffered-but-unplayed data - which,
+            // before playbackStarted, includes whatever primePlayback() had
+            // already counted toward its threshold. Without this, priming
+            // could fire play() on a buffer that's actually empty again.
+            if (!playbackStarted) bytesWrittenSincePrime = 0
         } catch (_: Exception) {
             // no-op if the track isn't in a state that allows flushing
         }
@@ -345,19 +359,21 @@ private class RaopConnectionHandler(
      * floor around -30.0 dB, and -144.0 (or anything very negative) means
      * mute.
      *
-     * Two separate mappings from that one dB value, deliberately different:
-     * - Actual audio gain: 10^(dB/20), the standard (exponential) dB-to-linear
-     *   conversion, since that's the perceptually-correct curve for loudness -
-     *   applied via AudioTrack.setStereoVolume (the API19-era volume control;
-     *   the single-argument setVolume(float) needs API 21+).
-     * - The on-screen "media volume" index: mapped *linearly* from dB instead
-     *   of through that same exponential gain. iOS sends evenly-spaced dB
-     *   steps per button press; feeding the exponential gain into Android's
-     *   small integer index range (e.g. 0-15) compresses/stretches those
-     *   steps unevenly depending where you are in the range, so one iPhone
-     *   button press could jump the indicator by zero or several steps.
-     *   Mapping dB directly keeps each press to one even step, matching the
-     *   default, intuitive feel of a normal volume control.
+     * Applied via AudioTrack.setStereoVolume using the standard (exponential)
+     * 10^(dB/20) dB-to-linear conversion - the perceptually-correct curve for
+     * loudness, and the API19-era volume control (the single-argument
+     * setVolume(float) needs API 21+).
+     *
+     * This used to *also* mirror the same value into
+     * AudioManager.setStreamVolume(), to keep Android's on-screen "media
+     * volume" indicator in sync. Removed: AudioFlinger applies track volume
+     * and stream volume multiplicatively, so doing both at once compounded -
+     * at anything below iOS's max volume, real output was quieter than
+     * either value alone implied. STREAM_MUSIC is now pinned to max once at
+     * session start (see createAudioTrack()) and left alone, so this is the
+     * only thing controlling real attenuation. The on-screen slider no
+     * longer tracks iOS's position; matching what's actually audible was
+     * judged more important than that cosmetic sync.
      */
     private fun handleSetParameterText(req: RtspRequest) {
         val text = String(req.body, Charsets.US_ASCII)
@@ -368,14 +384,7 @@ private class RaopConnectionHandler(
             try {
                 @Suppress("DEPRECATION") // setVolume(float) needs API 21+
                 audioTrack?.setStereoVolume(gain, gain)
-
-                val streamMax = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                val dbFloor = -30f // iOS's typical quietest non-mute level
-                val linearFraction = if (db <= -144f) 0f else ((db.coerceIn(dbFloor, 0f) - dbFloor) / -dbFloor)
-                val streamIndex = Math.round(linearFraction * streamMax)
-                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, streamIndex, 0)
-
-                Log.i(TAG, "SET_PARAMETER: volume $db dB -> gain $gain, stream index $streamIndex/$streamMax")
+                Log.i(TAG, "SET_PARAMETER: volume $db dB -> gain $gain")
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to apply volume", e)
             }
@@ -403,12 +412,47 @@ private class RaopConnectionHandler(
             bufferSize,
             AudioTrack.MODE_STREAM
         )
-        track.play()
+        // Don't play() yet - this device's low-power "deep-buffer-playback"
+        // HAL path underruns almost immediately if told to start consuming
+        // from an empty buffer (confirmed on real hardware: a BUFFER TIMEOUT
+        // ~390ms after every fresh RECORD, before decode/network had queued
+        // enough real audio to keep up). play() is deferred to primePlayback()
+        // below, once half a buffer's worth of real decoded audio is already
+        // queued, so the HAL never starts short.
+        playbackStarted = false
+        bytesWrittenSincePrime = 0
+        primeThresholdBytes = bufferSize / 2
+
+        // Pinned once at session start, not modulated per volume change
+        // anymore - see the comment on handleSetParameterText() for why.
+        audioManager.setStreamVolume(
+            AudioManager.STREAM_MUSIC,
+            audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
+            0
+        )
         return track
+    }
+
+    /** Starts playback once enough real decoded audio has been written to
+     *  the track to survive the HAL's own startup latency without running
+     *  dry - see the comment in createAudioTrack(). No-op after the first
+     *  time it fires for a given AudioTrack. */
+    private fun primePlayback(writtenBytes: Int) {
+        if (playbackStarted) return
+        bytesWrittenSincePrime += writtenBytes
+        if (bytesWrittenSincePrime >= primeThresholdBytes) {
+            audioTrack?.play()
+            playbackStarted = true
+        }
     }
 
     private fun startAudioReceiver(socket: DatagramSocket) {
         val thread = Thread({
+            // Reduce the odds of another app's background work (this is a
+            // 1GB RAM device) preempting the receive/decode/write path for
+            // long enough to starve AudioTrack - a CPU-side stutter cause
+            // independent of anything happening on the network.
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
             val buf = ByteArray(2048)
             val packet = DatagramPacket(buf, buf.size)
             var count = 0L
@@ -447,7 +491,9 @@ private class RaopConnectionHandler(
 
         val seqno = ((data[headerOffset + 2].toInt() and 0xFF) shl 8) or
             (data[headerOffset + 3].toInt() and 0xFF)
+        pendingResends.remove(seqno)
         if (payloadType == 0x60) trackSequence(seqno)
+        retryStaleResends()
 
         val decoder = alacDecoder ?: return
         val payload = data.copyOfRange(headerOffset + 12, length)
@@ -457,9 +503,36 @@ private class RaopConnectionHandler(
 
         try {
             val pcm = decoder.decode(alacFrame)
+            applyBoost(pcm)
             audioTrack?.write(pcm, 0, pcm.size)
+            primePlayback(pcm.size * 2) // decode() returns samples (2 bytes each); primeThresholdBytes counts bytes
         } catch (e: Exception) {
             Log.e(TAG, "ALAC decode/playback failed", e)
+        }
+    }
+
+    /**
+     * Extra headroom beyond what iOS's own volume alone provides, since a
+     * lot of real-world usage sits well under max iPhone volume for
+     * comfortable listening and this receiver has no other way to push
+     * output louder than unity gain (AudioTrack.setStereoVolume is
+     * platform-clamped to 1.0, so any boost has to happen here, in the PCM
+     * domain, before the data ever reaches AudioTrack).
+     *
+     * +3dB (~1.41x) was picked deliberately conservative: loud hard-clipping
+     * a whole waveform sounds much worse than the quiet it's fixing, and
+     * hip-hop/reggaeton-style hot masters (common in real usage here) have
+     * little headroom left to boost into before clipping. A plain multiply +
+     * hard clamp, not a soft-knee limiter - a real limiter needs a
+     * per-sample transcendental function, real CPU cost on a Snapdragon 410
+     * this project just finished protecting from CPU contention. At a
+     * conservative gain like this, hard-clamping should be rare enough in
+     * practice not to be worth that cost.
+     */
+    private fun applyBoost(pcm: ShortArray) {
+        for (i in pcm.indices) {
+            val boosted = (pcm[i] * BOOST_GAIN).toInt()
+            pcm[i] = boosted.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
         }
     }
 
@@ -503,8 +576,31 @@ private class RaopConnectionHandler(
             req[7] = count.toByte()
             control.send(DatagramPacket(req, req.size, address, clientControlPort))
             Log.i(TAG, "Requested resend of $count packet(s) from seqno $firstMissingSeqno")
+            val now = System.currentTimeMillis()
+            for (i in 0 until count) {
+                pendingResends[(firstMissingSeqno + i) and 0xFFFF] = now
+            }
         } catch (e: IOException) {
             Log.w(TAG, "Failed to send resend request: ${e.message}")
+        }
+    }
+
+    /**
+     * A resend request (or its reply) can itself be lost, especially on a
+     * lossier/mobile link - without this, that packet is just silently gone
+     * for good even though the whole point of resending was to recover it.
+     * Retried at most once per seqno; if the retry doesn't arrive either,
+     * it's given up on rather than chased indefinitely.
+     */
+    private fun retryStaleResends() {
+        if (pendingResends.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val stale = pendingResends.entries.filter { now - it.value >= RESEND_RETRY_MS }.map { it.key }
+        for (seqno in stale) {
+            pendingResends.remove(seqno)
+            if (retriedResends.add(seqno)) {
+                sendResendRequest(seqno, 1)
+            }
         }
     }
 

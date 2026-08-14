@@ -27,6 +27,7 @@ class RaopAdvertiser(private val context: Context) {
 
     private var jmdns: JmDNS? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private var raopServiceInfo: ServiceInfo? = null
 
     @Throws(IOException::class)
@@ -38,6 +39,18 @@ class RaopAdvertiser(private val context: Context) {
         lock.setReferenceCounted(true)
         lock.acquire()
         multicastLock = lock
+
+        // Android's own WiFi power-saving can nap the radio between packets
+        // when it judges traffic to be idle-ish, independent of whatever the
+        // AP (a home router or an iPhone's Personal Hotspot) is doing on its
+        // end - a plausible contributor to jitter/stutter that's easy to
+        // rule out. Full-performance mode keeps the Ace4's own radio fully
+        // awake for the whole advertise+playback lifetime.
+        @Suppress("DEPRECATION") // WIFI_MODE_FULL_HIGH_PERF is the correct pre-Q mode; deprecated in favor of a no-op on API 29+
+        val perfLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "airplayReceiverWifiLock")
+        perfLock.setReferenceCounted(true)
+        perfLock.acquire()
+        wifiLock = perfLock
 
         val address = wifiInetAddress(wifiManager)
         val dns = JmDNS.create(address, deviceName)
@@ -83,6 +96,9 @@ class RaopAdvertiser(private val context: Context) {
 
         multicastLock?.let { if (it.isHeld) it.release() }
         multicastLock = null
+
+        wifiLock?.let { if (it.isHeld) it.release() }
+        wifiLock = null
     }
 
     private fun wifiInetAddress(wifiManager: WifiManager): InetAddress {

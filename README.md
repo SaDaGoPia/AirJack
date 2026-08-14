@@ -10,9 +10,8 @@ for the toolchain research and architecture decisions behind this setup.
 
 Verified end-to-end against a real iPhone on 2026-08-12: the notification
 shows the current track's title/artist/album and cover art, and the
-iPhone's own AirPlay volume slider/buttons now control the Ace4's actual
-output volume, with the Ace4's on-screen "media volume" indicator staying
-in sync too. The Now Playing view is dark-themed and minimal (no title bar),
+iPhone's own AirPlay volume slider/buttons control the Ace4's actual output
+volume. The Now Playing view is dark-themed and minimal (no title bar),
 built around one large circular status dial that's color-coded per state
 (teal = advertising, amber = reconnecting, red = error) instead of a plain
 system button, and the app/notification icons are a small generated glyph
@@ -23,6 +22,18 @@ speaker-name field locks (with an explanatory label) while advertising. The
 notification itself is now styled like a music player's - tinted with a
 color pulled straight from the current track's artwork, with a bigger, wider
 artwork banner in its expanded view.
+
+Verified working over an iPhone Personal Hotspot connection on 2026-08-14,
+not just shared home WiFi. Fixed a real cold-start bug that caused a
+stutter at the start of every track (AudioTrack was told to start playing
+before any audio had been buffered) plus a double-attenuation bug that made
+output quieter than intended below max iPhone volume, and added a
+conservative (+3dB) digital volume boost with clipping protection. Also
+hardened against mobile-connection jitter: a WiFi high-performance lock
+during playback, higher audio-thread priority, and a bounded retry for lost
+resend requests. One known gap remains under investigation: no jitter/
+reorder buffer yet, so a resent packet still plays out of order if it
+arrives late - see decisions doc.
 
 Not working, and not expected to start working without a change on Apple's
 side: pushing the Ace4's volume-button presses back to the iPhone (DACP
